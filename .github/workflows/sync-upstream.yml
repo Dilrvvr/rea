@@ -1,0 +1,31 @@
+name: Sync upstream
+
+on:
+  schedule:
+    # Run hourly at :23 (UTC), away from the busiest minute.
+    - cron: "23 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync main from morluto/rea
+    if: github.repository == 'Dilrvvr/rea' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Merge upstream changes without overwriting fork commits
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        # GitHub preserves fork commits and fails if the merge conflicts.
+        run: |
+          gh api --method POST "repos/${GH_REPO}/merge-upstream" \
+            -f branch=main \
+            --jq '.message'
