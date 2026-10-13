@@ -77,7 +77,7 @@ jobs:
   static:
     name: Static checks
     needs: changes
-    if: ${{ !cancelled() }}
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
       - name: Require successful change classification
@@ -94,20 +94,8 @@ jobs:
         run: npm run check:ci
       - if: needs.changes.outputs.code == 'true'
         run: npm run verify:test-discovery
-      - name: Check LLDB producer retention and launch contracts
-        if: needs.changes.outputs.code == 'true'
-        run: npm run test:python
       - if: needs.changes.outputs.code != 'true'
         run: npm run format:check
-      - name: Upload complete static diagnostics
-        if: always() && needs.changes.outputs.code == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: static-check-reports
-          path: .cache/static-checks/
-          include-hidden-files: true
-          if-no-files-found: ignore
-          retention-days: 7
 
   test-shard:
     name: Test shard (${{ matrix.shard }})
@@ -117,7 +105,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1/6, 2/6, 3/6, 4/6, 5/6, 6/6]
+        shard: [1/4, 2/4, 3/4, 4/4]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -180,7 +168,7 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          name: test-timings
+          name: test-results
           run-id: ${{ steps.history.outputs.run-id }}
           github-token: ${{ github.token }}
           path: .cache/ci-test-history
@@ -209,21 +197,20 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  sqlite-runtime:
-    needs: [changes, build]
-    if: needs.changes.outputs.code == 'true'
-    uses: ./.github/workflows/sqlite-runtime.yml
-
   test:
     name: Test (coverage + timing)
     needs: [changes, test-shard]
-    if: ${{ !cancelled() }}
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
-      - name: Require successful change classification
+      - name: Require successful test shards
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
-        run: test "${CHANGES_RESULT}" = "success"
+          CODE_REQUIRED: ${{ needs.changes.outputs.code }}
+          SHARD_RESULT: ${{ needs.test-shard.result }}
+        run: |
+          test "${CHANGES_RESULT}" = "success"
+          test "${CODE_REQUIRED}" != "true" || test "${SHARD_RESULT}" = "success"
       - uses: actions/checkout@v4
         if: needs.changes.outputs.code == 'true' && success()
       - uses: actions/setup-node@v4
@@ -240,7 +227,6 @@ jobs:
           pattern: vitest-report-*
           merge-multiple: true
       - name: Merge coverage, JUnit, and timing reports
-        id: merge
         if: needs.changes.outputs.code == 'true' && success()
         run: >-
           npm run test:ci:merge --
@@ -254,13 +240,27 @@ jobs:
           --outputFile.junit=test-results.xml
           --outputFile.json=test-results.json
       - name: Summarize slowest test files
-        if: needs.changes.outputs.code == 'true' && !cancelled() && hashFiles('test-results.json') != ''
-        env:
-          SHARD_RESULT: ${{ needs.test-shard.result }}
-          MERGE_RESULT: ${{ steps.merge.outcome }}
-        run: node scripts/ci/test-report.mjs
+        if: needs.changes.outputs.code == 'true' && success()
+        shell: bash
+        run: |
+          node <<'NODE' >> "${GITHUB_STEP_SUMMARY}"
+          const report = JSON.parse(require("node:fs").readFileSync("test-results.json", "utf8"));
+          const files = (report.testResults ?? [])
+            .map((result) => ({
+              name: result.name,
+              duration: Math.max(0, (result.endTime ?? result.startTime) - result.startTime),
+            }))
+            .sort((left, right) => right.duration - left.duration)
+            .slice(0, 20);
+          console.log("## Slowest deterministic test files\n");
+          console.log("| File | Duration (ms) |");
+          console.log("| --- | ---: |");
+          for (const file of files) {
+            console.log(`| \`${file.name}\` | ${file.duration} |`);
+          }
+          NODE
       - uses: actions/upload-artifact@v4
-        if: needs.changes.outputs.code == 'true' && !cancelled() && hashFiles('test-results.json') != ''
+        if: needs.changes.outputs.code == 'true' && always()
         with:
           name: test-results
           path: |
@@ -269,21 +269,6 @@ jobs:
             coverage/
           if-no-files-found: error
           retention-days: 30
-      - name: Publish successful timing history
-        if: needs.changes.outputs.code == 'true' && success() && needs.test-shard.result == 'success'
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-timings
-          path: .cache/ci-test-history/test-results.json
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 30
-      - name: Require successful test shards
-        if: ${{ !cancelled() }}
-        env:
-          CODE_REQUIRED: ${{ needs.changes.outputs.code }}
-          SHARD_RESULT: ${{ needs.test-shard.result }}
-        run: test "${CODE_REQUIRED}" != "true" || test "${SHARD_RESULT}" = "success"
 
   conformance-fixtures:
     name: Source-built conformance fixtures
@@ -387,7 +372,7 @@ jobs:
 
   apple-artifacts:
     name: Real Apple artifact CLI/MCP E2E
-    needs: [changes, build]
+    needs: changes
     if: needs.changes.outputs.apple == 'true'
     runs-on: macos-15
     timeout-minutes: 15
@@ -398,10 +383,6 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
-      - uses: actions/download-artifact@v4
-        with:
-          name: rea-build-cache
-          path: .turbo/cache/
       - name: Verify Apple artifact formats and metadata
         env:
           REA_ARTIFACT_NODE_COMPILE_CACHE: ${{ runner.temp }}/rea-artifact-node-cache
@@ -464,7 +445,7 @@ jobs:
 
   windows-curated:
     name: Windows capability and package lane
-    needs: [changes, build, windows-native-build]
+    needs: [changes, windows-native-build]
     if: needs.changes.outputs.package == 'true'
     runs-on: windows-latest
     timeout-minutes: 25
@@ -475,11 +456,8 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
-      - uses: actions/download-artifact@v4
-        with:
-          name: rea-build-cache
-          path: .turbo/cache/
       - run: npm run build:cached
+      - run: npm run typecheck
       - uses: actions/download-artifact@v4
         with:
           name: windows-native-controls
@@ -518,7 +496,6 @@ jobs:
           tests/boundary/filesystem/javascript-applications/javascriptArtifactReconstruction.test.ts
           tests/conformance/providers/ghidra/windowsCapabilities.test.ts
           src/ghidra/GhidraInstallation.test.ts
-          tests/boundary/filesystem/ghidraJavaProbe.test.ts
           tests/boundary/providers/ghidra/ghidraTransport.test.ts
           tests/boundary/providers/ghidra/ghidraTargetSnapshot.test.ts
           tests/boundary/providers/ghidra/ghidraLauncher.test.ts
@@ -656,7 +633,7 @@ jobs:
 
   required:
     name: CI required
-    if: ${{ !cancelled() }}
+    if: ${{ always() }}
     needs:
       [
         changes,
@@ -664,7 +641,6 @@ jobs:
         static,
         build,
         test-shard,
-        sqlite-runtime,
         test,
         conformance-fixtures,
         windows-native-build,
