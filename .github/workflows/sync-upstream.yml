@@ -2,8 +2,8 @@ name: Sync upstream
 
 on:
   schedule:
-    # Run hourly at :23 (UTC), away from the busiest minute.
-    - cron: "23 * * * *"
+    # Run at 00:00, 08:00, and 16:00 UTC every day.
+    - cron: "0 0,8,16 * * *"
   workflow_dispatch:
 
 permissions:
