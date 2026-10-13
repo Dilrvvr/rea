@@ -190,12 +190,21 @@ try {
     const candidate = join(candidateRoot, "module.wasm");
     await writeFile(join(candidateRoot, "source.wat"), "(module (memory 2))");
     await tool("wat2wasm", ["source.wat", "-o", "module.wasm"], candidateRoot);
-    const glue = join(fixtureRoot, "glue.js");
-    await writeFile(
-      glue,
-      'fetch("./module.wasm"); new URL("https://example.invalid/module.wasm?version=1", import.meta.url);',
+    const glueSource =
+      'fetch("./module.wasm"); new URL("https://example.invalid/module.wasm?version=1", import.meta.url);';
+    const glueSources = [
+      glueSource,
+      `\uFEFF${glueSource}`,
+      `\uFEFF\n${glueSource}`,
+      `#!/usr/bin/env node\n${glueSource}`,
+      `\uFEFF#!/usr/bin/env node\n${glueSource}`,
+    ];
+    const gluePaths = glueSources.map((_, index) =>
+      join(fixtureRoot, `glue-${index}.js`),
     );
-    const input = { path, glue_paths: [glue], candidate_paths: [candidate] };
+    for (const [index, gluePath] of gluePaths.entries())
+      await writeFile(gluePath, glueSources[index]);
+    const input = { path, glue_paths: gluePaths, candidate_paths: [candidate] };
     assert.ok(ajv.validate(advertised.inputSchema, input));
     const cliValue = await inspectCli(input);
     assert.equal(cliValue.category, undefined, JSON.stringify(cliValue));
@@ -219,11 +228,31 @@ try {
     assert.equal(report.wat.sha256, sha256(wat));
     assert.equal(report.headers, `${headers}\n`);
     assert.equal(report.details, details.slice(1));
-    assert.equal(report.glue[0].artifact.sha256, sha256(await readFile(glue)));
-    assert.deepEqual(
-      report.glue[0].references.map(({ candidate_paths }) => candidate_paths),
-      [[path], [path, candidate]],
-    );
+    assert.equal(report.glue.length, glueSources.length);
+    for (const [index, source] of glueSources.entries()) {
+      const observed = report.glue[index];
+      assert.equal(observed.artifact.path, gluePaths[index]);
+      assert.equal(observed.artifact.sha256, sha256(source));
+      assert.equal(observed.artifact.bytes, Buffer.byteLength(source));
+      assert.equal(await readFile(gluePaths[index], "utf8"), source);
+      assert.equal(observed.parse_status, "complete");
+      assert.deepEqual(
+        observed.references.map(({ candidate_paths }) => candidate_paths),
+        [[path], [path, candidate]],
+      );
+      assert.deepEqual(
+        observed.references.map(({ line, column }) => ({ line, column })),
+        ["./module.wasm", "https://example.invalid/module.wasm?version=1"].map(
+          (value) => {
+            const offset = source.indexOf(`"${value}"`);
+            return {
+              line: source.slice(0, offset).split("\n").length,
+              column: offset - source.lastIndexOf("\n", offset) - 1,
+            };
+          },
+        ),
+      );
+    }
     assert.notEqual(report.candidates[0].sha256, report.candidates[1].sha256);
     for (const command of report.tool_profile.commands)
       assert.equal(command.sha256, sha256(await readFile(command.path)));
@@ -310,7 +339,23 @@ try {
         }),
       );
       assert.equal(error.category, "invalid_input");
-      const failed = parseEvidence(error.details.partial_observation);
+      const partial = error.details.partial_observation;
+      assert.equal(partial.kind, "retained-evidence");
+      const failedBundleReply = await client.callTool({
+        name: "get_evidence_bundle",
+        arguments: {},
+      });
+      assert.notEqual(
+        failedBundleReply.isError,
+        true,
+        mcpTextValue(failedBundleReply),
+      );
+      const failedBundle = JSON.parse(mcpTextValue(failedBundleReply)).result;
+      const failed = parseEvidence(
+        failedBundle.records.find(
+          ({ evidence_id }) => evidence_id === partial.evidence_id,
+        ),
+      );
       assert.equal(failed.subject.digest.sha256, sha256(invalidBytes));
       assert.equal(
         failed.normalized_result.validation,

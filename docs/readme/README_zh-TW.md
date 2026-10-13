@@ -19,7 +19,11 @@
 
 **[網站](https://rea.tools/zh-TW/) · [指南](https://rea.tools/zh-TW/guides/) · [案例](https://rea.tools/zh-TW/showcase/)**
 
-[快速開始](#快速開始) · [REA 的工作原理](#rea-的工作原理) · [可以分析什麼](#可以分析什麼) · [案例](#案例) · [常見問題](#常見問題) · [文件](#文件)
+[快速開始](#快速開始) · [REA 的工作原理](#rea-的工作原理) · [可以分析什麼](#可以分析什麼) · [案例](#案例) · [常見問題](#常見問題) · [GNU objdump 與 Rizin 工具](../reverse-engineering-tools.md) · [文件](#文件)
+
+> [!IMPORTANT]
+> REA 官方來源： [morluto/rea](https://github.com/morluto/rea), [rea.tools](https://rea.tools/), [rea-agents](https://www.npmjs.com/package/rea-agents) (npm).
+> 請透過這些官方來源提供的安裝與發布連結取得 REA。相似的儲存庫名稱或複製的 README 不能證明下載內容來自官方。
 
 <code>npx rea-agents setup</code>
 
@@ -51,7 +55,7 @@
 
 REA 將 AI 代理連接到分析工具，用於檢查原生二進位檔案、JavaScript 和 Electron 應用、.NET 程式集以及網站。你也可以在終端中使用同樣的工具。分析在本機執行，結果包含支撐各項結論的證據和相關限制。
 
-設定流程會向 AI 代理註冊 REA，並安裝對應的工作流程指引。原生分析可以使用已有的 Hopper 或 Ghidra；設定流程也可以在你核准後安裝 Hopper。靜態 JavaScript 分析不需要這兩個引擎。
+設定流程會向 AI 代理註冊 REA，並安裝對應的工作流程指引。原生分析可以使用已有的 Hopper、Ghidra 或 IDA；設定流程也可以在你核准後安裝 Hopper。靜態 JavaScript 分析不需要原生分析引擎。
 
 > **[訪問 REA 網站](https://rea.tools/zh-TW/)**，查看設定說明、圖解指南和真實案例。
 
@@ -100,11 +104,13 @@ rea --help
 
 REA 更新較快，新版本經常包含錯誤修復。請將安裝的版本保持最新。
 
-通過 npm 安裝的 CLI 使用：
+通過 `npm install --global` 或 `bun add --global` 安裝的 CLI 使用：
 
 ```bash
 rea update
 ```
+
+Bun 全域更新需要 Bun 1.2.17 或更新版本。如果使用較舊的 Bun 版本，請先手動升級 Bun，再執行 `rea update`。
 
 要更新 AI 代理註冊和 skill，請執行更新命令輸出的設定命令。
 
@@ -114,7 +120,7 @@ rea update
 npx rea-agents@latest setup
 ```
 
-檢查設定變更並重新啟動 AI 代理。單次 CLI 操作可使用 `npx rea-agents@latest`，後接所需命令。
+檢查設定變更並重新啟動 AI 代理。單次 CLI 操作可使用 `npx rea-agents@latest`，後接所需命令。使用 Bun 時，用 `bunx rea-agents@latest` 代替 `npx rea-agents@latest`。
 
 ## REA 的工作原理
 
@@ -134,7 +140,10 @@ REA 需要 Node.js 22.x（>=22.19）、24.x（>=24.11）或 26+，以及 npm。�
 | --------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
 | 原生二進位檔案        | 偽程式碼、組合語言、字串、符號、呼叫和引用                      | Hopper、Ghidra 或 IDA；[原生分析](https://rea.tools/zh-TW/guides/native/)                                          |
 | 離線 ELF 佈局         | 節、段、原始符號/重定位資訊及靜態防護機制候選項                 | Linux x64 上由呼叫方提供的 pwntools；[二進位診斷](../binary-diagnostics.md)                                        |
+| Go 二進位檔案         | 內嵌編譯器版本、模組、替換項和建置設定                          | 內建靜態 ELF/PE/thin Mach-O 檢查；無需安裝 Go                                                                      |
+| WASM 工件             | 驗證、節、精確的匯入/匯出 WAT 形式及解碼後的 WAT                | 呼叫方提供的 WABT 1.0.42；`inspect_wasm_artifact`                                                                  |
 | EVM 位元組碼          | 分派選擇器、位元組偏移、推斷的參數和狀態可變性                  | Linux x64 上的本地原始位元組/十六進位輸入載體；[離線 EVM 指南](../evm-bytecode.md)                                 |
+| Rust binaries         | Embedded cargo-auditable dependency list                        | [Rust binaries](../rust-binaries.md)                                                                               |
 | 已記錄的 Linux 崩潰   | 原始 note 記錄、每個已記錄執行緒的暫存器/訊號及可選的對映候選項 | Linux x64 上由呼叫方提供的 pwntools；可選的 GDB/pwndbg；[已記錄崩潰](../recorded-crashes.md)                       |
 | JavaScript / Electron | 模組、匯入、source map、路由、IPC 和原生附加元件關係            | Node.js 和 npm；[應用分析](https://rea.tools/zh-TW/guides/javascript/)                                             |
 | 網站                  | 頁面結構、腳本、網路觀察結果和按請求獲取的螢幕擷取畫面          | Chrome 系瀏覽器；[瀏覽器分析](https://rea.tools/zh-TW/guides/browser/)                                             |

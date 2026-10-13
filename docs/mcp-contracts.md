@@ -21,6 +21,31 @@ directly to `compare_functions`, and `inspect_artifact` Evidence to
 `compare_artifacts`. Use `get_evidence_bundle` when the task needs broader
 retained session history or an explicit bundle for transfer.
 
+Artifact inventories declare `coverage.scope` (`root` or `container-entries`)
+and `coverage.status` (`complete` or `unknown`) independently of diagnostic
+wording. Comparison requires matching scopes, complete graph members and complete
+traversal coverage before concluding equality. A fully observed root without
+container children can be `unchanged`; its scope notice stays in `limitations`
+without creating a gap. Content and executable metadata changes still produce
+root deltas. Missing graph members yield `truncated`; unknown traversal coverage
+or unavailable occurrence hashes retain uncertainty. Integrity mismatches remain
+contradictions. Static artifact equality does not establish unchanged runtime
+behavior.
+
+Exhausted traversals with deliberately omitted filesystem entries retain
+`unknown` coverage and identify each omitted path/type in `limitations`; FIFO,
+socket and device entries are not opened. Case-distinct archive members remain
+separate observations. Their case-insensitive materialization diagnostic does
+not reduce traversal coverage when both spellings were read.
+
+Current output also retains `coverage_status` (`complete` or `partial`) for existing clients, derived from the scoped traversal status. The owning parser normalizes retained `coverage_status` records to scoped coverage and rejects conflicting declarations.
+
+The coverage field is optional when reading older retained Evidence. The owning
+inventory parser recognizes historical REA scope notices for compatibility;
+unfamiliar legacy limitations remain conservative. Typed records do not derive
+coverage from limitation text. Pages from one inventory must carry the same
+coverage declaration.
+
 Function dossiers can declare per-facet coverage in the optional
 `normalized_result.facet_availability` map. Each supplied facet is either
 `{ "available": true }` or `{ "available": false, "reason": "..." }`.
@@ -271,9 +296,11 @@ Evidence remain complete inline, and both input forms pass the same semantic,
 identity, authority, and provenance checks without running the producer again.
 
 References belong to the current connection's Evidence ledger. Opening another
-target preserves retained records; `close_binary` clears them, even when no
-binary is active. A fresh connection has its own ledger. A missing reference
-reports its exact ID and `details.reason: "missing"`; the server cannot infer
+target or restarting the current target preserves retained records, including
+when provider cleanup fails; records remain available for export and retry.
+`close_binary` clears them, even when no binary is active. A fresh connection
+has its own ledger. A missing reference reports its exact ID and
+`details.reason: "missing"`; the server cannot infer
 whether it was never recorded, cleared, or retained by another connection.
 Supply complete inline Evidence, repeat its producer, or import an exported
 Evidence bundle before referencing that imported record. Export a bundle before
@@ -472,6 +499,7 @@ These deadlines have different owners:
 | MCP initialize       | The client bounds transport/REA connection startup, before any target query.                                                                                                                                                        |
 | Hopper startup       | REA allows 120,000 ms by default; `REA_HOPPER_STARTUP_TIMEOUT_MS` accepts decimal integers from 1–2,147,483,647 ms. Invalid values fail configuration validation. Startup failure is reported by the first provider query.          |
 | Ghidra startup       | REA allows 330,000 ms by default; `REA_GHIDRA_STARTUP_TIMEOUT_MS` accepts decimal integers from 1–2,147,483,647 ms. Invalid supplied values fail configuration validation. Startup failure is reported by the first provider query. |
+| Darwin swiftc helper | REA allows 120,000 ms by default for ownership-helper compilation; `REA_SWIFTC_COMPILE_TIMEOUT_MS` accepts decimal integers from 1–2,147,483,647 ms. Invalid values fail configuration validation.                                  |
 | Individual tool call | The client bounds its wait, including cold engine startup. The pinned client SDK 2.3.1 defaults to 60,000 ms and can cancel earlier than REA's startup deadline.                                                                    |
 
 For an already connected client using the pinned SDK, request options are the
@@ -602,8 +630,12 @@ failures for such entries name this cause and the operation to rerun with
 
 Advertised input and output schemas contain no reachable recursive references.
 Schemas share repeated definitions through schema-local references while
-preserving complete nested fields and validation rules. Input properties retain
-their descriptions and literal examples.
+preserving complete nested fields and validation rules. Input schemas whose
+shared definitions would exhaust a client's declaration-rendering reference
+budget (Pi 1.1.0 code-mode shares 32 reference expansions across an input and
+renders every later reference as `unknown`) are re-projected without shared
+definitions, so every advertised field renders with complete structure.
+Input properties retain their descriptions and literal examples.
 
 When a host forwards input schemas to the model, their examples consume context.
 REA's advertised examples therefore never copy complete producer Evidence.
@@ -650,7 +682,7 @@ JSON Schema:
   objects or arrays.
 - The few schemas whose validation structure alone exceeds the budget
   (`compare_web_captures`, `build_reconstruction_obligation_ledger`,
-  `evaluate_reconstruction_coverage`, `project_managed_application_graph`,
+  `evaluate_reconstruction_coverage`,
   `compare_application_versions`, `capture_browser_scenario`) are advertised
   in a reduced form: property names, reference-resolved types (including union
   alternatives), first-level guidance, and the root's required-field constraints,
@@ -660,8 +692,7 @@ JSON Schema:
   instead of silent acceptance.
 
 Boundary tests pin every advertised compact schema to the budget, keep them
-valid JSON Schema that still accepts every canonical example, and hold the
-set of six reduced presentations as contracts evolve. Client verification
+valid JSON Schema that still accepts every canonical example. Client verification
 also checks provider-facing sizes and canonical examples after conversion by
 the actual Kimi Code CLI; local captures do not establish Moonshot acceptance.
 

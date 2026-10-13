@@ -11,6 +11,18 @@ unparsed module-text line. A missing record is an unknown, not proof of a
 non-Go binary; observed metadata does not authenticate its claims. Function,
 source and type recovery remain a separate native-analysis question.
 
+## Rust dependency metadata
+
+Use `inspect_rust_binary` for an explicit local ELF, PE, or thin Mach-O when
+the question concerns the cargo-auditable crate list embedded in `.dep-v0`
+(Mach-O: `__DATA,.dep-v0`). No `open_binary`, Rust installation, or target
+execution is required. The CLI equivalent is `inspect-rust-binary PATH`.
+Preserve artifact SHA-256, package order, dependency indices, and the section
+file range. A missing section is null metadata, not proof the binary has no
+dependencies. An omitted package kind stays null. A rustc commit hash is
+inferred from a read-only `/rustc/<40-hex>/` path and does not by itself
+identify the compiler. See [Rust binaries](https://github.com/morluto/rea/blob/main/docs/rust-binaries.md).
+
 ## SQLite snapshots
 
 Use `inspect_sqlite_database` with an explicit local database snapshot for its
@@ -175,7 +187,9 @@ additional evidence only when the provider accepts and matches them.
 REA has a built-in read-only snapshot parser for x64 PE targets with .NET 8 RTR
 9.1 metadata. An optional headless Ghidra adapter adds database annotations and
 broader metadata recovery on Linux; it requires an explicitly configured
-NativeAOT JAR. These are separate routes. See the
+NativeAOT JAR. These are separate routes. The built-in parser also runs on
+Windows Ghidra P0; read frozen literals from its report, because
+`search_strings` does not include them. See the
 [NativeAOT guide](https://github.com/morluto/rea/blob/main/docs/ghidra-nativeaot.md)
 for setup, supported layouts, and host restrictions. Preserve binary identity
 and distinguish derived metadata from Ghidra database observations. Recovered
@@ -247,3 +261,9 @@ resolution is explicit; missing references and size mismatch remain visible.
 Other payloads are opaque, and this operation does not decode images or simulate
 Windows resource loading. Consult the budgets and supported tree profile in
 [offline binary diagnostics](https://github.com/morluto/rea/blob/main/docs/binary-diagnostics.md).
+
+For exact core-module import/export differences, use `compare_wasm_interfaces`
+with two complete inspection Evidence records (or current-session retained
+references) and explicit scope. Preserve unknown types/duplicate names; static
+interface equality is not runtime compatibility. CLI accepts complete inline
+Evidence in `rea compare-wasm-interfaces input.json --json`.

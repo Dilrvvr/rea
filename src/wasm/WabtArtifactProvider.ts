@@ -268,9 +268,11 @@ export class WabtArtifactProvider implements WasmArtifactPort {
           undefined,
           this.#resources,
         );
-        const source = new TextDecoder("utf-8", { fatal: true }).decode(
-          bytes.bytes,
-        );
+        // Keep source characters intact so locations match the hashed artifact.
+        const source = new TextDecoder("utf-8", {
+          fatal: true,
+          ignoreBOM: true,
+        }).decode(bytes.bytes);
         glue.push({
           artifact: { path, sha256: bytes.sha256, bytes: bytes.bytes.length },
           ...associateWasmGlue(
@@ -362,8 +364,13 @@ export class WabtArtifactProvider implements WasmArtifactPort {
           OPERATION,
           "Unexpected WABT decoding output.",
         );
-      const { imports, exports, customSectionNames, debugModuleNames } =
-        parseWabtWat(wat.stdout.text);
+      const {
+        imports,
+        exports,
+        customSectionNames,
+        debugModuleNames,
+        interface: interfaceFacts,
+      } = parseWabtWat(wat.stdout.text);
       capturedOutput = {
         stdout: dump.stdout.text,
         stderr: dump.stderr.text,
@@ -388,6 +395,7 @@ export class WabtArtifactProvider implements WasmArtifactPort {
         sections,
         imports,
         exports,
+        interface: interfaceFacts,
         headers,
         details,
         wat: {
