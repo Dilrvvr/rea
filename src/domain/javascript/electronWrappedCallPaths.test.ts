@@ -140,6 +140,60 @@ it("preserves an observed empty contextBridge API object", () => {
   expect(result.parse_status).toBe("complete");
 });
 
+describe("wrapped contextBridge exposure methods", () => {
+  it("retains the original expression for a dynamic isolated world id", () => {
+    const result = analyzeJavaScriptStaticSource(
+      bundle(
+        `const worldId = selectWorld(); electron.contextBridge.exposeInIsolatedWorld(worldId, "isolatedApi", {ping: true});`,
+      ),
+    );
+    expect(result.electron.context_bridge_apis).toContainEqual(
+      expect.objectContaining({
+        world: "isolated",
+        world_id: {
+          status: "dynamic",
+          value: null,
+          expression: "worldId",
+        },
+        api_key: "isolatedApi",
+        members: ["ping"],
+        resolution_basis: "wrapper-substitution",
+      }),
+    );
+    expect(result.parse_status).toBe("partial");
+  });
+
+  it("does not report a conditionally selected world as unconditional", () => {
+    const result = analyzeJavaScriptStaticSource(
+      bundle(
+        `if (useIsolated) electron.contextBridge.exposeInIsolatedWorld(1001, "isolatedApi", {ping: true});`,
+      ),
+    );
+    expect(result.electron.context_bridge_apis).not.toContainEqual(
+      expect.objectContaining({
+        api_key: "isolatedApi",
+        resolution_basis: "wrapper-substitution",
+      }),
+    );
+    expect(result.parse_status).toBe("partial");
+  });
+
+  it("does not report conditionally resolved world ids as unconditional", () => {
+    const result = analyzeJavaScriptStaticSource(
+      bundle(
+        `const worldId = useFirstWorld ? 1001 : 1002; electron.contextBridge.exposeInIsolatedWorld(worldId, "isolatedApi", {ping: true});`,
+      ),
+    );
+    expect(result.electron.context_bridge_apis).not.toContainEqual(
+      expect.objectContaining({
+        api_key: "isolatedApi",
+        resolution_basis: "wrapper-substitution",
+      }),
+    );
+    expect(result.parse_status).toBe("partial");
+  });
+});
+
 it("connects exposed closures to IPC sends and text clipboard calls", () => {
   const result = analyzeJavaScriptStaticSource(
     bundle(`
@@ -502,6 +556,38 @@ it("resolves renamed default and namespace import helpers from their syntax", ()
       ?.flatMap((p) => p.steps)
       .every((step) => step.label.length > 0),
   ).toBe(true);
+});
+it("resolves an empty bootstrap module key through an exported Electron bridge", () => {
+  const result = analyzeJavaScriptStaticSource(`(() => {
+    const modules = {
+      ""(module) { module.exports = require("electron"); },
+      9(module, exports, load) {
+        const electron = load("");
+        electron.contextBridge.exposeInMainWorld("desktop", {
+          copy: () => electron.ipcRenderer.send("test:empty-module"),
+        });
+      },
+    };
+    function load(id) {
+      const module = { exports: {} };
+      modules[id].call(module.exports, module, module.exports, load);
+      return module.exports;
+    }
+    load(9);
+  })();`);
+  expect(result.bundler_registrations).toMatchObject([
+    {
+      entry_module_keys: ["9"],
+      modules: [{ module_key: "" }, { module_key: "9" }],
+    },
+  ]);
+  expect(result.electron.call_paths).toContainEqual(
+    expect.objectContaining({
+      entry: "desktop.copy",
+      channel: "test:empty-module",
+      terminal: "electron.ipcRenderer.send",
+    }),
+  );
 });
 it("does not trust helper names or follow returns after a definite throw", () => {
   for (const helper of [

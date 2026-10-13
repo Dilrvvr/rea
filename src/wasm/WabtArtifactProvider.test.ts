@@ -4,8 +4,10 @@ import { expect, it } from "vitest";
 import { createTestTempDirectory } from "../../tests/fixtures/temporaryDirectory.js";
 import { WabtArtifactProvider } from "./WabtArtifactProvider.js";
 import { PrivateRuntimeRoot } from "../process/PrivateRuntimeRoot.js";
+import { PrivateRuntimeRootUnavailableError } from "../process/PrivateRuntimeRootUnavailableError.js";
 import { spawnOwnedProviderProcess } from "../process/ProviderProcess.js";
 import { OwnedCommandFailure } from "../process/OwnedCommand.js";
+import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 
 const failureTags: Readonly<Record<string, string>> = {
   invalid: "AnalysisInputError",
@@ -36,6 +38,52 @@ it("returns actionable unavailable without creating a workspace when tools are a
     },
   });
 });
+
+it.each([false, true])(
+  "reports an unavailable private runtime root with retryable=%s without a misleading WABT remediation",
+  async (retryable) => {
+    const toolRoot = await createTestTempDirectory("rea-wabt-tool-root-");
+    for (const tool of ["wasm-validate", "wasm-objdump", "wasm2wat"])
+      await writeFile(
+        join(toolRoot, tool + (process.platform === "win32" ? ".exe" : "")),
+        "source-owned executable seam",
+        { mode: 0o700 },
+      );
+    const provider = new WabtArtifactProvider(
+      { REA_WABT_BIN_DIRECTORY: toolRoot },
+      undefined,
+      () => {
+        throw new PrivateRuntimeRootUnavailableError(
+          "REA Windows native controls are unavailable: probe failure",
+          { retryable },
+        );
+      },
+    );
+    const result = await provider.inspect({
+      path: "/module.wasm",
+      glue_paths: [],
+      candidate_paths: [],
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        _tag: "AnalysisCapabilityUnavailableError",
+        retryable,
+        userMessage: undefined,
+        message: expect.stringContaining(
+          "REA Windows native controls are unavailable",
+        ),
+      },
+    });
+    if (result.ok)
+      throw new Error("Unavailable runtime must refuse inspection");
+    expect(projectAnalysisError(result.error)).toMatchObject({
+      code: "capability_unavailable",
+      retryable,
+      category: retryable ? "unavailable" : "unsupported_provider",
+    });
+  },
+);
 it.each([
   "success",
   "invalid",

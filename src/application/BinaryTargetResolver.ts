@@ -31,7 +31,8 @@ import {
   rawBinarySelectionError,
 } from "../domain/rawBinary.js";
 import type { BinaryArchitecture } from "../domain/binaryTargetTypes.js";
-import { mzWindowsHeaderOffset } from "../domain/dosMz.js";
+import { observeMzWindowsHeader } from "../domain/dosMz.js";
+import { hasBinaryPlistSignature } from "../domain/apple/appleArchiveFormat.js";
 import {
   hasZipSignature,
   isZipPackageFormat,
@@ -207,16 +208,24 @@ export const parseBinaryTarget = async (
     if (cause instanceof AnalysisCancelledError) return err(cause);
     if (cause instanceof BinaryTargetError) return err(cause);
     if (!(cause instanceof Error)) throw cause;
-    const code = filesystemErrorCode(cause);
-    if (code === undefined) throw cause;
-    return err(
-      new BinaryTargetError(
-        candidate,
-        targetFailureReason(code, cause.message),
-        { cause },
-      ),
-    );
+    const failure = classifyBinaryTargetFilesystemFailure(candidate, cause);
+    if (failure === undefined) throw cause;
+    return err(failure);
   }
+};
+
+/** Classify a filesystem failure while reading a previously selected target. */
+export const classifyBinaryTargetFilesystemFailure = (
+  path: string,
+  cause: unknown,
+): BinaryTargetError | undefined => {
+  if (!(cause instanceof Error)) return undefined;
+  const code = filesystemErrorCode(cause);
+  return code === undefined
+    ? undefined
+    : new BinaryTargetError(path, targetFailureReason(code, cause.message), {
+        cause,
+      });
 };
 
 const filesystemErrorCode = (cause: Error): string | undefined => {
@@ -286,12 +295,15 @@ const detectArtifactFormat = async (
     if (lower.endsWith(".app")) return "app-pack";
     return zipPackageFormatForPath(lower) ?? "zip";
   }
+  // Binary plists, including keyed archives, often use other extensions.
+  if (hasBinaryPlistSignature(magic.subarray(0, observed.bytesRead)))
+    return "plist";
   const named = namedArtifactFormat(lower);
   if (named !== undefined) return named;
   if (
     lower.endsWith(".pkg") &&
     observed.bytesRead >= 4 &&
-    magic.subarray(0, 4).toString("ascii") === "xar!"
+    magic.subarray(0, 4).equals(Buffer.from("xar!"))
   )
     return "pkg";
   if (lower.endsWith(".dmg")) {
@@ -302,7 +314,7 @@ const detectArtifactFormat = async (
       const trailer = Buffer.alloc(4);
       const read = await handle.read(trailer, 0, trailer.length, size - 512);
       throwIfTargetResolutionCancelled(signal);
-      if (read.bytesRead === 4 && trailer.toString("ascii") === "koly")
+      if (read.bytesRead === 4 && trailer.equals(Buffer.from("koly")))
         return "dmg";
     }
   }
@@ -401,11 +413,31 @@ const readExecutableMetadata = async (
   const fileSize = (await handle.stat()).size;
   throwIfTargetResolutionCancelled(signal);
   if (bytes.length >= 2 && bytes[0] === 0x4d && bytes[1] === 0x5a) {
-    const offset = mzWindowsHeaderOffset(bytes);
-    if (offset !== null) {
-      if (offset < 64)
+    let windowsHeader = observeMzWindowsHeader(bytes, fileSize);
+    let signatureBytes: Buffer | undefined;
+    if (windowsHeader.state === "signature-needed") {
+      const { offset } = windowsHeader;
+      const signature = Buffer.alloc(Math.min(4, fileSize - offset));
+      const observedSignature = await handle.read(
+        signature,
+        0,
+        signature.length,
+        offset,
+      );
+      throwIfTargetResolutionCancelled(signal);
+      signatureBytes = signature.subarray(0, observedSignature.bytesRead);
+      windowsHeader = observeMzWindowsHeader(bytes, fileSize, signatureBytes);
+    }
+    if (windowsHeader.state === "declared") {
+      if (windowsHeader.offset < 64)
         return err("invalid Windows new-header offset in MZ image");
-      return readPeMetadata(handle, offset, signal);
+      return readPeMetadata(
+        handle,
+        windowsHeader.offset,
+        bytes,
+        fileSize,
+        signal,
+      );
     }
     // MZ relocation records may extend past the initial probe; their format
     // bounds are at most 65535 records inside a 65535-paragraph header.
@@ -428,7 +460,12 @@ const readExecutableMetadata = async (
         fileSize,
       );
     }
-    return parseExecutableHeader(bytes, hostArchitecture, fileSize);
+    return parseExecutableHeader(
+      bytes,
+      hostArchitecture,
+      fileSize,
+      signatureBytes,
+    );
   }
   if (bytes.length >= 8) {
     const magic = bytes.readUInt32BE(0);
@@ -479,6 +516,8 @@ const readExecutableMetadata = async (
 const readPeMetadata = async (
   handle: FileHandle,
   offset: number,
+  mzPrefix: Buffer,
+  fileSize: number,
   signal?: AbortSignal,
 ): Promise<Result<ExecutableMetadata, string>> => {
   throwIfTargetResolutionCancelled(signal);
@@ -492,9 +531,15 @@ const readPeMetadata = async (
   throwIfTargetResolutionCancelled(signal);
   if (fileHeaderRead.bytesRead !== fileHeader.length)
     return err("invalid or truncated PE header");
-  const signature = fileHeader.toString("ascii", 0, 2);
-  if (["NE", "LE", "LX"].includes(signature))
-    return err(`unsupported ${signature} executable in MZ image`);
+  const windowsHeader = observeMzWindowsHeader(
+    mzPrefix,
+    fileSize,
+    fileHeader.subarray(0, 4),
+  );
+  if (windowsHeader.state !== "declared")
+    return err("invalid Windows new-header signature in MZ image");
+  if (["NE", "LE", "LX"].includes(windowsHeader.signature))
+    return err(`unsupported ${windowsHeader.signature} executable in MZ image`);
   const optionalHeaderSize = fileHeader.readUInt16LE(20);
   if (optionalHeaderSize > 4096) return err("invalid PE optional header size");
   const record = Buffer.alloc(24 + optionalHeaderSize);

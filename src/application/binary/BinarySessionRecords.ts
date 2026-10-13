@@ -11,6 +11,7 @@ import {
   AnalysisSnapshotMismatchError,
 } from "../../domain/evidenceErrors.js";
 import type { AnalysisError } from "../../domain/analysisErrorBase.js";
+import type { AnalysisInputError } from "../../domain/analysisErrorCore.js";
 import type { UnknownRegistryError } from "../../domain/unknownRegistryError.js";
 import type {
   RecordUnknownInput,
@@ -18,6 +19,10 @@ import type {
   UnknownStatus,
   UpdateUnknownInput,
 } from "../../domain/residualUnknown.js";
+import type {
+  UnknownPage,
+  UnknownQuery,
+} from "../investigation/InvestigationRecordPort.js";
 import { err, ok, type Result } from "../../domain/result.js";
 import type {
   AnalysisExecution,
@@ -129,7 +134,7 @@ export abstract class BinarySessionRecords {
 
   importEvidenceBundle(
     bundle: unknown,
-  ): Result<number, EvidenceIntegrityError> {
+  ): Result<number, EvidenceIntegrityError | AnalysisInputError> {
     const imported = this.#records.mergeEvidenceBundle(bundle);
     if (!imported.ok) return imported;
     if (imported.value.metadataChanged) this.invalidateSnapshot();
@@ -347,6 +352,10 @@ export abstract class BinarySessionRecords {
     } = {},
   ): ResidualUnknown[] {
     return this.#records.listUnknowns(filters);
+  }
+
+  listUnknownsPage(query: UnknownQuery = {}): UnknownPage {
+    return this.#records.listUnknownsPage(query);
   }
 
   verifyUnknownResolution(unknownId: string): Result<

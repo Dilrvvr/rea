@@ -1,7 +1,9 @@
+import { resolve } from "node:path";
+
 import {
-  createImmutableEvidenceBundle,
   describeEvidenceBundleFailure,
   describeValidationFailure,
+  parseImmutableEvidenceBundle,
   parseEvidenceBundle,
   type EvidenceBundle,
 } from "../domain/evidenceBundle.js";
@@ -37,41 +39,39 @@ type EvidenceWriteFailure =
 export const readEvidenceBundle = (
   path: string,
   signal?: AbortSignal,
+  resources?: ArtifactResourceScope,
 ): Promise<Result<EvidenceBundle, EvidenceReadFailure>> =>
-  readBundle(path, parseEvidenceBundle, signal);
+  readBundle(path, parseEvidenceBundle, signal, resources);
 
 /** Read an authenticated immutable snapshot for a subsequent session import. */
 export const readImmutableEvidenceBundle = (
   path: string,
   signal?: AbortSignal,
+  resources?: ArtifactResourceScope,
 ): Promise<Result<EvidenceBundle, EvidenceReadFailure>> =>
-  readBundle(
-    path,
-    (input) => {
-      const bundle = parseEvidenceBundle(input);
-      return createImmutableEvidenceBundle(bundle.records, bundle.unknowns);
-    },
-    signal,
-  );
+  readBundle(path, parseImmutableEvidenceBundle, signal, resources);
 
 const readBundle = async (
   path: string,
   parseBundle: (input: unknown) => EvidenceBundle,
   signal?: AbortSignal,
+  resources?: ArtifactResourceScope,
 ): Promise<Result<EvidenceBundle, EvidenceReadFailure>> => {
   if (signal?.aborted)
     return err(new AnalysisCancelledError("import_evidence_bundle"));
-  const loaded = await readJsonFile(path, signal).catch((cause: unknown) => {
-    // A failed close transfers a live handle owner; preserve that failure.
-    if (
-      signal?.aborted === true &&
-      !(cause instanceof RegularFileCleanupFailure)
-    )
-      return err(
-        new AnalysisCancelledError("import_evidence_bundle", { cause }),
-      );
-    throw cause;
-  });
+  const loaded = await readJsonFile(path, signal, resources).catch(
+    (cause: unknown) => {
+      // A failed close transfers a live handle owner; preserve that failure.
+      if (
+        signal?.aborted === true &&
+        !(cause instanceof RegularFileCleanupFailure)
+      )
+        return err(
+          new AnalysisCancelledError("import_evidence_bundle", { cause }),
+        );
+      throw cause;
+    },
+  );
   if (!loaded.ok) return loaded;
   if (signal?.aborted)
     return err(new AnalysisCancelledError("import_evidence_bundle"));
@@ -79,10 +79,19 @@ const readBundle = async (
   try {
     bundle = parseBundle(loaded.value);
   } catch (cause: unknown) {
+    const failure = describeEvidenceBundleFailure(loaded.value, cause);
+    if (failure.kind === "single-record")
+      return err(
+        new EvidenceFileError("read", "wrong-kind", {
+          path: resolve(path),
+          cause,
+          userMessage: failure.message,
+        }),
+      );
     return err(
       new EvidenceIntegrityError("Evidence bundle validation failed", {
         cause,
-        userMessage: describeEvidenceBundleFailure(loaded.value, cause),
+        userMessage: failure.message,
       }),
     );
   }

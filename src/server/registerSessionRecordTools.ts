@@ -89,6 +89,7 @@ const registerSnapshotEvidenceTool = ({
 const registerImportEvidenceTool = ({
   server,
   session,
+  resources,
   importContract,
 }: EvidenceToolRegistration): void => {
   server.registerTool(
@@ -97,7 +98,7 @@ const registerImportEvidenceTool = ({
     async (input, context) => {
       const path = input.path;
       const signal = context.mcpReq.signal;
-      const loaded = await readImmutableEvidenceBundle(path, signal);
+      const loaded = await readImmutableEvidenceBundle(path, signal, resources);
       if (!loaded.ok)
         return server.delivery.toCallToolResult(loaded, importContract);
       const retainedUnknownRevisions = new Set(
@@ -150,18 +151,14 @@ const registerListUnknownsTool = ({
     listContract.name,
     toolRegistrationOptions(listContract),
     (input) => {
-      const all = session.listUnknowns({
+      const page = session.listUnknownsPage({
         ...(input.status === undefined ? {} : { status: input.status }),
         ...(input.severity === undefined ? {} : { severity: input.severity }),
         ...(input.domain === undefined ? {} : { domain: input.domain }),
+        offset: input.offset,
+        ...(input.limit === undefined ? {} : { limit: input.limit }),
       });
-      return server.delivery.toCallToolResult(
-        ok({
-          items: all,
-          total: all.length,
-        }),
-        listContract,
-      );
+      return server.delivery.toCallToolResult(ok(page), listContract);
     },
   );
 };
