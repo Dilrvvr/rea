@@ -75,7 +75,9 @@ class MergeUpstreamTest(unittest.TestCase):
             self.write(f".github/workflows/new-{version}.yml", "name: New workflow\n")
             upstream_sha = self.commit("test: update code and workflows")
             self.git("switch", "main")
+            fork_sha = self.git("rev-parse", "HEAD")
             self.sync()
+            self.assert_single_merge(fork_sha, upstream_sha)
             self.assertEqual((self.repo / "app.txt").read_text(), f"upstream version {version}\n")
             self.assertEqual((self.repo / "fork-only.txt").read_text(), "keep my changes\n")
             self.assertEqual(self.git("rev-parse", "HEAD:.github/workflows"), workflows)
@@ -84,6 +86,31 @@ class MergeUpstreamTest(unittest.TestCase):
         synced_sha = self.git("rev-parse", "HEAD")
         self.sync()
         self.assertEqual(self.git("rev-parse", "HEAD"), synced_sha)
+
+    def assert_single_merge(self, fork_sha, upstream_sha):
+        self.assertEqual(
+            self.git("rev-list", "--count", "HEAD", "--not", fork_sha, upstream_sha),
+            "1",
+            "Sync must add exactly one commit beyond the fork and upstream histories.",
+        )
+        self.assertEqual(
+            self.git("show", "-s", "--format=%P", "HEAD"),
+            f"{fork_sha} {upstream_sha}",
+            "The merge must directly retain the original fork and upstream commits.",
+        )
+
+    def test_workflow_only_update_records_one_merge_without_tree_changes(self):
+        fork_sha = self.git("rev-parse", "HEAD")
+        fork_tree = self.git("rev-parse", "HEAD^{tree}")
+        self.git("switch", "upstream")
+        self.write(".github/workflows/ci.yml", "name: Changed upstream CI\n")
+        self.write(".github/workflows/new.yml", "name: New upstream workflow\n")
+        upstream_sha = self.commit("test: update only upstream workflows")
+        self.git("switch", "main")
+        self.sync()
+        self.assert_single_merge(fork_sha, upstream_sha)
+        self.assertEqual(self.git("rev-parse", "HEAD^{tree}"), fork_tree)
+        self.assertEqual(self.git("status", "--porcelain"), "")
 
     def test_conflict_aborts_without_changing_fork(self):
         self.write("app.txt", "fork edit\n")

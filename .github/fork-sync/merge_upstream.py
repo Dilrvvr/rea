@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Merge upstream code, keeping this fork's automation unchanged.
 
-The prepared commit retains upstream as its parent, but replaces upstream's
-workflow directory before merging. New workflows never reach the fork's active
-tree, and GITHUB_TOKEN does not need permission to edit workflow files. Existing
-workflows are disabled separately by sync-upstream.yml.
+A temporary commit replaces upstream's workflow directory to calculate the
+merged tree. The published merge uses the original upstream commit as its second
+parent, so only one new commit enters the fork's history. New workflows never
+reach the fork's active tree, and GITHUB_TOKEN does not need permission to edit
+workflow files. Existing workflows are disabled separately by sync-upstream.yml.
 """
 
 import os
@@ -74,10 +75,16 @@ def merge_upstream(ref):
                 + result.stdout + result.stderr + conflicts
             )
         git("diff", "--cached", "--exit-code", fork_sha, "--", *PRESERVED_PATHS)
-        git(
-            "commit", "--no-gpg-sign", "-m", "chore: sync upstream",
+        # Save the merged tree, then discard the temporary merge state. Only
+        # the original fork and upstream commits become published parents.
+        merged_tree = git("write-tree").stdout.strip()
+        git("merge", "--abort")
+        merged_sha = git(
+            "commit-tree", merged_tree, "-p", fork_sha, "-p", upstream_sha,
+            "-m", "chore: sync upstream",
             "-m", f"Upstream-Commit: {upstream_sha}",
-        )
+        ).stdout.strip()
+        git("merge", "--ff-only", merged_sha)
     except BaseException:
         if git("rev-parse", "--verify", "MERGE_HEAD", check=False).returncode == 0:
             git("merge", "--abort")
