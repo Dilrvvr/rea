@@ -121,6 +121,52 @@ fi`,
   ]);
 });
 
+it("refuses device listings with an invalid state token", async () => {
+  const malformedLine = "serial deviceXYZ  ";
+  const { binary } = await writeAdbStub(
+    () => `if [ "$1" = "version" ]; then ${VERSION_BLOCK}; exit 0; fi
+if [ "$1" = "devices" ]; then
+  printf 'List of devices attached\\n${malformedLine}\\n'
+  exit 0
+fi`,
+  );
+  const result = await providerOver(binary).execute({
+    operation: "list_adb_devices",
+    input: {},
+  });
+  expect(result.ok).toBe(false);
+  if (result.ok) return;
+  expect(result.error._tag).toBe("AnalysisProtocolError");
+  expect(result.error.message).toContain(malformedLine);
+});
+
+it("lists rescue and detached transports alongside online devices", async () => {
+  const { binary } = await writeAdbStub(
+    () => `if [ "$1" = "version" ]; then ${VERSION_BLOCK}; exit 0; fi
+if [ "$1" = "devices" ]; then
+  printf 'List of devices attached\\n'
+  printf 'serial-online          device transport_id:1\\n'
+  printf 'serial-rescue          rescue transport_id:2\\n'
+  printf 'serial-detached        detached transport_id:3\\n'
+  exit 0
+fi`,
+  );
+  const result = await evidenceResult(providerOver(binary), {
+    operation: "list_adb_devices",
+    input: {},
+  });
+  expect(result.devices).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ serial: "serial-online", state: "device" }),
+      expect.objectContaining({ serial: "serial-rescue", state: "rescue" }),
+      expect.objectContaining({
+        serial: "serial-detached",
+        state: "detached",
+      }),
+    ]),
+  );
+});
+
 it("inspects a device through the getprop whitelist", async () => {
   const { binary } = await writeAdbStub(
     () => `if [ "$1" = "version" ]; then ${VERSION_BLOCK}; exit 0; fi
@@ -580,6 +626,34 @@ it("projects package details from dumpsys package output", async () => {
   });
 });
 
+// Android 10 and 11 append ": restricted=true" to hard- and soft-restricted
+// entries of the requested-permissions list (Settings.dumpPackageLPr).
+it("counts requested permissions that the device marks as restricted", async () => {
+  const { binary } = await writeAdbStub(
+    shellStub({
+      "dumpsys:package": `Packages:
+  Package [com.example] (abcdef):
+    userId=10234
+    versionName=1.2.3
+    requested permissions:
+      android.permission.INTERNET
+      android.permission.WRITE_EXTERNAL_STORAGE: restricted=true
+      android.permission.CAMERA
+    install permissions:
+      android.permission.INTERNET: granted=true
+`,
+    }),
+  );
+  const result = await evidenceResult(providerOver(binary), {
+    operation: "inspect_adb_package",
+    input: { serial: "emulator-5554", package: "com.example" },
+  });
+  expect(result).toMatchObject({
+    requested_permissions_count: 3,
+    coverage: "complete",
+  });
+});
+
 it("reports an uninstalled package from dumpsys refusal output", async () => {
   const { binary } = await writeAdbStub(
     shellStub({ "dumpsys:package": "Unable to find package: com.absent\n" }),
@@ -735,6 +809,36 @@ exit 1`,
   });
   expect(result.error.message).toContain("overwrite");
 });
+
+it.each([
+  ["offline", false, "error: device offline"],
+  ["unauthorized", false, "error: device unauthorized"],
+  ["offline", true, "error: device offline"],
+] as const)(
+  "reports the %s device state when the push existence probe cannot run (overwrite %s)",
+  async (state, overwrite, stderr) => {
+    const { binary, root } = await writeAdbStub(
+      (stubRoot) => `if [ "$1" = "version" ]; then ${VERSION_BLOCK}; exit 0; fi
+if [ "$1" = "-s" ]; then printf '%s\\n' "$3" >> "${stubRoot}/calls"; printf '%s\\n' "${stderr}" >&2; exit 1; fi`,
+    );
+    const localFile = join(root, "payload.bin");
+    await writeFile(localFile, "x");
+    const projected = await refusedBy(providerOver(binary), {
+      operation: "push_adb_file",
+      input: {
+        serial: "emulator-5554",
+        local_path: localFile,
+        device_path: "/data/local/tmp/payload.bin",
+        overwrite,
+      },
+    });
+    // Existence is unknown, so nothing is claimed about the path and no push runs.
+    expect(projected).toMatchObject({ code: "unsupported_target" });
+    expect(projected.message).toContain(state);
+    expect(projected.message).not.toContain("already exists");
+    expect(await readFile(join(root, "calls"), "utf8")).toBe("shell\n");
+  },
+);
 
 it("reports a local push source that does not exist", async () => {
   const { binary } = await writeAdbStub(

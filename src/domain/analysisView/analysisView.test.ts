@@ -1,6 +1,5 @@
 import { expect, it } from "vitest";
 
-import { resolveJavaScriptSourceMapReference } from "../javascript/javascriptSourceMapPaths.js";
 import { functionDossierSchema } from "../hopperValues.js";
 import { ghidraFunctionDossier } from "../ghidraValues.fixture.js";
 import { JAVASCRIPT_APPLICATION_EVIDENCE_EXAMPLE } from "../../contracts/javascript/javascriptRuntimeReconciliationExample.js";
@@ -24,13 +23,14 @@ import {
   completeWithinViewCoverage,
   pageViewCoverage,
 } from "./analysisViewCoverage.js";
+import { sourceMapReference } from "../javascript/javascriptApplicationGraph.fixture.js";
 import { javascriptModulePath } from "./javascriptApplicationView.js";
-
 import {
   inspectAnalysisViewInputSchema,
   projectAnalysisView,
   type AnalysisViewParent,
 } from "./analysisView.js";
+
 const layoutParent = (): AnalysisViewParent => {
   const evidence = analysisViewLayoutEvidence();
   return {
@@ -169,7 +169,8 @@ it("pages every retained dossier collection and the native API record", () => {
       | "comments"
       | "unresolved_calls"
       | "referenced_strings"
-      | "referenced_names",
+      | "referenced_names"
+      | "swift_string_literals",
     result: unknown = original,
   ) => {
     const view = projectAnalysisView(nativeParent(result), {
@@ -195,6 +196,23 @@ it("pages every retained dossier collection and the native API record", () => {
     }),
   ).toMatchObject({ item: [{ text: "entry" }] });
   expect(page("referenced_names")).toMatchObject({ coverage: { total: 0 } });
+  const literal = {
+    source_address: "0x401004",
+    value: "SleepDisabled",
+    representation: "small",
+    address: null,
+    registers: ["x0", "x1"],
+    words: ["0x7369447065656c53", "0xed000064656c6261"],
+  };
+  expect(
+    page("swift_string_literals", {
+      ...original,
+      swift_string_literals: [literal],
+    }),
+  ).toMatchObject({ item: [literal], coverage: { total: 1 } });
+  expect(page("swift_string_literals")).toMatchObject({
+    item: { available: false, reason: "not recorded" },
+  });
   const { unresolved_calls: _omitted, ...withoutUnresolved } = original;
   expect(
     page("unresolved_calls", {
@@ -532,7 +550,7 @@ it("pages actual modules, including unknown and empty paths, without unrelated r
         observations: original.observations.map((observation) => ({
           ...(kind === "source-module"
             ? {
-                source_map_reference: resolveJavaScriptSourceMapReference(
+                source_map_reference: sourceMapReference(
                   "",
                   null,
                   "renderer.js",
@@ -773,4 +791,30 @@ it("rejects unsupported parent operations and incompatible collections", () => {
     ok: false,
     error: { _tag: "AnalysisInputError" },
   });
+});
+
+it("preserves selected native facet unavailability instead of an exhausted empty page", () => {
+  const parent = nativeParent({
+    ...functionDossierSchema.parse(ghidraFunctionDossier()),
+    facet_availability: {
+      comments: { available: false, reason: "Typed comments unavailable" },
+      references: { available: false, reason: "Typed references unavailable" },
+    },
+  });
+  for (const [facet, reason] of [
+    ["comments", "Typed comments unavailable"],
+    ["incoming_references", "Typed references unavailable"],
+  ] as const) {
+    const result = projectAnalysisView(parent, {
+      kind: "native",
+      facet,
+      offset: 0,
+      limit: 8,
+    });
+    if (!result.ok) throw result.error;
+    expect(result.value).toMatchObject({
+      item: { available: false, reason },
+      unknowns: expect.arrayContaining([reason]),
+    });
+  }
 });

@@ -17,14 +17,16 @@ additional permission flag or degraded mode is required.
 - Node.js 22.x (>=22.19), 24.x (>=24.11), or 26+;
 - an operator-installed Ghidra 12.1.x distribution (verified with 12.1.4);
 - a 64-bit full JDK inside that installation's declared Java range (JDK 21 or newer, with no maximum, for current 12.1 releases);
-- an explicit native, non-managed x86 or x86-64 PE application or DLL; and
+- an explicit native, non-managed x86 or x86-64 PE application/DLL, or a
+  [raw NMOS 6502 image](raw-binary.md#nmos-6502) with a caller-supplied entry; and
 - the 25 read-only Ghidra inventory, memory, and function-analysis operations.
 
 Loaded memory reads and file offsets preserve Ghidra's observed source mappings.
 PE load-image inspection returns an explicit unsupported attestation status.
 Independent verification covers admitted DOS MZ, explicit COM, and explicit
-[raw-binary imports](raw-binary.md) on their supported hosts. This does not
-extend Windows P0 admission beyond native PE. For x64 PE
+[raw-binary imports](raw-binary.md) on their supported hosts, including the
+admitted raw NMOS 6502 mapping on Windows. Windows P0 admission remains limited
+to native PE and raw NMOS 6502 images. For x64 PE
 NativeAOT RTR 9.1, the read-only snapshot parser can report metadata through
 `inspect_native_load_image` and `inspect_native_data_type` without a JAR or
 database mutation. A real Windows-host NativeAOT Ghidra run is still required
@@ -34,6 +36,12 @@ This boundary does not establish general Windows feature parity. Ghidra GUI
 state, annotations, other target architectures and formats, and Hopper-only
 operations remain unavailable through this provider. Managed PE/CLI inspection
 uses its separate execution-free provider.
+
+Raw 6502 imports retain the same native filesystem and process ownership
+requirements. The complete image must fit in the 16-bit address space; no
+console-specific cartridge loader, CPU variant, or bank-switching model is
+implied. Run `npm run verify:ghidra:6502` with caller-installed `ca65`/`ld65`
+to check the source-built fixture through real CLI and MCP workflows.
 
 REA does not install or upgrade Ghidra, Java, Python, npm, Node.js, Hopper, or a
 compiler. The adapter uses the packaged Java `HeadlessScript`; Python and
@@ -153,8 +161,12 @@ the private runtime, isolating Ghidra preferences, logs, and caches.
 Process creation assigns a suspended child atomically to an owned Job Object.
 Membership and kill-on-owner-close policy are verified before resume.
 Breakaway is disabled. Only the child's default file owner is normalized;
-the caller token stays unchanged. Caller CPU affinity and priority are
-preserved. Close, cancellation, timeout, startup failure, and provider failure
+the caller token stays unchanged. Caller priority is preserved, and caller CPU
+affinity whenever the caller and the child share a processor group. A child that
+Windows places in another group keeps that group's default when the caller asked
+for no bound of its own; a caller pinned to fewer processors than its group
+holds is refused there rather than widened.
+Close, cancellation, timeout, startup failure, and provider failure
 terminate the job and verify all members have settled before runtime cleanup.
 Cleanup removes admitted objects by handle and unlinks reparse entries without
 following their targets. Abrupt owner death kills the job but can leave

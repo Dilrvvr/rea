@@ -21,6 +21,26 @@ directly to `compare_functions`, and `inspect_artifact` Evidence to
 `compare_artifacts`. Use `get_evidence_bundle` when the task needs broader
 retained session history or an explicit bundle for transfer.
 
+Function dossiers can declare per-facet coverage in the optional
+`normalized_result.facet_availability` map. Each supplied facet is either
+`{ "available": true }` or `{ "available": false, "reason": "..." }`.
+Supported keys are `pseudocode`, `assembly`, `comments`, `callers`, `callees`,
+`references`, `strings_names`, and `cfg`. Availability describes whether that
+facet was observed, not whether its collection contains any entries.
+
+`compare_functions` keeps a dimension `unknown` with null counts when either
+side declares a required facet unavailable. An empty legacy facet without a
+coverage declaration is also unknown. A producer that actually observed an
+empty facet can declare it available so observed absence remains comparable.
+Call comparison additionally retains the Evidence relationship coverage
+checks. IDA declares the facets its selected adapter cannot provide; an empty
+unsupported array does not prove observed absence.
+Evidence and bundle imports reject unsupported fields in their envelopes,
+identities, manifests and other fixed metadata before authentication. Imports
+leave retained session state unchanged when validation fails. Keep application
+metadata in the supported JSON payloads (`parameters`, `raw_result`,
+`normalized_result`, or analysis-profile parameters), where keys are preserved.
+
 Tool execution failures return `isError: true` and the complete canonical
 `{ "error": ... }` diagnostic as JSON in text `content`. Read that diagnostic
 for the error code, target details, partial observations, and remediation.
@@ -45,7 +65,7 @@ unresolved relationship reads. Cancellation remains a tool error.
 REA prepares complete MCP results within the pinned stdio client's 10 MiB
 receive-buffer budget, including both text and structured representations and
 room for the JSON-RPC envelope. Tool errors carry only their text
-representation, so only that text counts against the budget. Response budget settings are captured at startup;
+representation and `isError` flag, so only those count against the budget. Response budget settings are captured at startup;
 restart or recreate the server to apply changes. If a result cannot fit, REA returns
 `resource_constraint` with `details.resource: "transport"` before constructing
 a document-sized string. Analysis Evidence remains complete in the current
@@ -141,8 +161,8 @@ after target content was read.
 
 ## Retained application Evidence inputs
 
-`analyze_javascript_application`, `inspect_binary_layout`, `inspect_artifact`, and
-`inspect_wasm_artifact` accept `detail`:
+`analyze_javascript_application`, `inspect_binary_layout`, `inspect_artifact`,
+`inspect_wasm_artifact`, and `inspect_macho` accept `detail`:
 `complete` (default) returns the complete analysis Evidence; `summary` records
 that complete Evidence in the session and returns the derived
 `inspect_analysis_view` summary Evidence instead. Its
@@ -211,6 +231,19 @@ For counts, validation and WAT identity, select `detail: "summary"` on the first
 attempting oversized delivery, and returns the same summary with an exact
 `parent_evidence_id` for later export or facet reads. Delivery detail does not
 reach WABT or change the original source Evidence ID.
+
+Completed `inspect_macho` Evidence supports a summary and
+`view: {kind: "macho", facet: "exports", offset: 0, limit: 64}`. Facets are
+`entrypoints`, `architectures`, `build_metadata`, `load_commands`,
+`dependencies`, `imports`, `exports`, `segments`, and `provenance`; pages return
+the original rows. The summary keeps the selected slice, header fields and UUID,
+and replaces each collection with its returned count, reported total and
+`exhaustive` flag. Each page repeats the paged collection's `source_total` and
+`source_exhaustive`; exhausting a non-exhaustive collection does not establish
+that unreturned symbols are absent. Large frameworks return megabytes of
+symbols (Electron Framework: 2.5 MB of imports and exports, 3.3 KB as a
+summary), so select `detail: "summary"` on the first call. Delivery detail
+never reaches the native tools or changes the source Evidence ID.
 
 `trace_application_feature`, `trace_javascript_semantics`,
 `compare_application_versions`, `compare_source_to_bundle`, and

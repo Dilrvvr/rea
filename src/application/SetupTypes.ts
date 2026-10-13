@@ -25,7 +25,22 @@ export type ClientConfigurationResult =
     }
   | {
       readonly status: "failed";
-      readonly reason: "path" | "backup" | "write" | "readback";
+      readonly reason:
+        | "path"
+        | "target_changed"
+        | "backup"
+        | "write"
+        | "readback";
+    }
+  | {
+      readonly status: "failed";
+      readonly reason: "rollback";
+      readonly backupPath?: string;
+      readonly failure: {
+        readonly kind: "restore";
+        readonly path: string;
+        readonly detail: string;
+      };
     };
 
 /** Read-only state used to block unsafe setup plans before any mutation. */
@@ -45,6 +60,8 @@ export interface SetupHost {
   readonly homeDirectory: string;
   skillDestinations(clientIds: readonly string[]): readonly SkillDestination[];
   readonly registrationCommand: readonly string[];
+  /** Why no client may be registered with `registrationCommand` from this host. */
+  readonly registrationCommandBlocker?: string;
   readonly nodeVersion: string;
   macosVersion(): Promise<string | undefined>;
   linuxDistribution(): Promise<LinuxDistribution | undefined>;

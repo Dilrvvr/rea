@@ -33,10 +33,16 @@ export type ArtifactAnalysisRuntime = Pick<
 
 /** Own admission, artifact descriptors, producer cleanup and private workspaces together. */
 export class ArtifactAnalysisResources {
-  readonly #artifacts = new ArtifactResourceScope();
+  readonly #artifacts: {
+    readonly scope: ArtifactResourceScope;
+    operation: string;
+  };
   readonly #pending = new Map<
     ArtifactAnalysisRuntime,
-    ProviderProcessSupervisor | undefined
+    {
+      readonly owner: ProviderProcessSupervisor | undefined;
+      readonly operation: string;
+    }
   >();
   #tail: Promise<void> = Promise.resolve();
   #busy = false;
@@ -51,19 +57,22 @@ export class ArtifactAnalysisResources {
       readonly message: string;
       readonly details: Readonly<Record<string, JsonValue>>;
     },
-  ) {}
+  ) {
+    this.#artifacts = { scope: new ArtifactResourceScope(), operation };
+  }
 
   run<T>(
     work: () => Promise<Result<T, AnalysisError>>,
     signal?: AbortSignal,
+    operation = this.operation,
   ): Promise<Result<T, AnalysisError>> {
     if (this.#closed || signal?.aborted)
-      return Promise.resolve(err(new AnalysisCancelledError(this.operation)));
+      return Promise.resolve(err(new AnalysisCancelledError(operation)));
     if (this.#busy)
       return Promise.resolve(
         err(
           new AnalysisResourceConstraintError(
-            this.operation,
+            operation,
             "capacity",
             this.capacity.message,
             this.capacity.details,
@@ -72,7 +81,14 @@ export class ArtifactAnalysisResources {
       );
     this.#busy = true;
     const running = this.#tail
-      .then(() => this.#artifacts.run(work))
+      .then(() =>
+        this.#artifacts.scope.run(() => {
+          // Failed descriptor cleanup still belongs to the preceding request until
+          // this scope has drained it and admits acquisition for the new request.
+          this.#artifacts.operation = operation;
+          return work();
+        }),
+      )
       .catch((cause: unknown) => err(this.#artifactFailure(cause)))
       .finally(() => {
         this.#busy = false;
@@ -90,19 +106,23 @@ export class ArtifactAnalysisResources {
       maximumBytes,
       signal,
       undefined,
-      this.#artifacts,
+      this.#artifacts.scope,
     );
   }
 
   readLimits(limits: LinuxResourceLimits): Promise<LinuxResourceLimits> {
-    return this.readKernelLimits(limits, this.#artifacts);
+    return this.readKernelLimits(limits, this.#artifacts.scope);
   }
 
   retain(
     root: ArtifactAnalysisRuntime,
     owner?: ProviderProcessSupervisor,
   ): void {
-    this.#pending.set(root, owner);
+    this.#pending.set(root, {
+      owner,
+      operation:
+        this.#pending.get(root)?.operation ?? this.#artifacts.operation,
+    });
   }
 
   get pendingPaths(): readonly string[] {
@@ -110,12 +130,13 @@ export class ArtifactAnalysisResources {
   }
 
   async release(): Promise<void> {
-    for (const [root, owner] of this.#pending) {
+    for (const [root, retained] of this.#pending) {
       try {
+        const { owner } = retained;
         if (owner !== undefined) {
           const stopped = await owner.stop();
           if (stopped.status === "incomplete") throw new Error(stopped.reason);
-          this.#pending.set(root, undefined);
+          this.#pending.set(root, { ...retained, owner: undefined });
         }
         await root.close();
         this.#pending.delete(root);
@@ -124,7 +145,7 @@ export class ArtifactAnalysisResources {
           this.providerId,
           [root.path],
           { reason: String(cause) },
-          { operation: this.operation, cause },
+          { operation: retained.operation, cause },
         );
       }
     }
@@ -134,6 +155,7 @@ export class ArtifactAnalysisResources {
     observation: NonNullable<ArtifactReaderFailure["cleanup"]>,
     cause: unknown,
     capturedOutput?: AnalysisCapturedOutput,
+    operation = this.operation,
   ): ProviderCleanupError {
     return new ProviderCleanupError(
       this.providerId,
@@ -144,7 +166,7 @@ export class ArtifactAnalysisResources {
           ? {}
           : { captured_output: { ...capturedOutput } }),
       },
-      { operation: this.operation, cause },
+      { operation, cause },
     );
   }
 
@@ -155,6 +177,7 @@ export class ArtifactAnalysisResources {
       readonly output_bytes: number;
     },
     effectiveLimits: LinuxResourceLimits | undefined,
+    operation = this.operation,
   ): AnalysisError {
     const capturedOutput =
       cause.snapshot === null
@@ -171,16 +194,16 @@ export class ArtifactAnalysisResources {
       ...(capturedOutput === undefined ? {} : { capturedOutput }),
     };
     if (cause.reason === "cancelled")
-      return new AnalysisCancelledError(this.operation, detail);
+      return new AnalysisCancelledError(operation, detail);
     if (cause.reason === "timeout")
       return new AnalysisTimeoutError(
-        this.operation,
+        operation,
         limits.command_timeout_ms,
         detail,
       );
     if (cause.reason === "output-limit")
       return new AnalysisResourceConstraintError(
-        this.operation,
+        operation,
         "memory",
         cause.message,
         { output_bytes: limits.output_bytes },
@@ -192,18 +215,19 @@ export class ArtifactAnalysisResources {
         cause.snapshot?.signal === "SIGXCPU")
     )
       return new AnalysisResourceConstraintError(
-        this.operation,
+        operation,
         cause.snapshot.signal === "SIGXFSZ" ? "file-size" : "cpu",
         `Producer terminated with ${cause.snapshot.signal}; the signal's exact cause is not independently established.`,
         effectiveLimits === undefined ? null : { ...effectiveLimits },
         detail,
       );
-    return new AnalysisOutputError(this.operation, cause.message, detail);
+    return new AnalysisOutputError(operation, cause.message, detail);
   }
 
   async finish<T>(
     result: Result<T, AnalysisError>,
     observation: (value: T) => AnalysisPartialObservation,
+    operation = this.operation,
   ): Promise<Result<T, AnalysisError>> {
     try {
       await this.release();
@@ -223,7 +247,7 @@ export class ArtifactAnalysisResources {
               : projectAnalysisError(result.error),
           },
           {
-            operation: this.operation,
+            operation,
             cause,
             ...(partialObservation === undefined ? {} : { partialObservation }),
           },
@@ -242,7 +266,7 @@ export class ArtifactAnalysisResources {
   async #closeResources(): Promise<void> {
     let descriptorFailure: AnalysisError | undefined;
     try {
-      await this.#artifacts.close();
+      await this.#artifacts.scope.close();
     } catch (cause: unknown) {
       descriptorFailure = this.#artifactFailure(cause);
     }
@@ -253,18 +277,21 @@ export class ArtifactAnalysisResources {
         throw analysisErrorWithCleanupFailure(
           descriptorFailure,
           cause,
-          this.operation,
+          this.#artifacts.operation,
         );
       throw cause;
     }
     if (descriptorFailure !== undefined) throw descriptorFailure;
   }
 
-  #artifactFailure(cause: unknown): AnalysisError {
+  #artifactFailure(
+    cause: unknown,
+    operation = this.#artifacts.operation,
+  ): AnalysisError {
     if (cause instanceof AnalysisError) return cause;
     if (cause instanceof ArtifactReaderFailure && cause.cleanup !== undefined)
-      return this.cleanupFailure(cause.cleanup, cause);
-    return new ProviderAdapterError(this.providerId, this.operation, {
+      return this.cleanupFailure(cause.cleanup, cause, undefined, operation);
+    return new ProviderAdapterError(this.providerId, operation, {
       cause,
       diagnostics: { stage: "artifact-resources", reason: String(cause) },
     });

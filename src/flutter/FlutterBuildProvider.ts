@@ -23,6 +23,7 @@ import {
   AnalysisUnsupportedTargetError,
 } from "../domain/analysisErrorCore.js";
 import { AnalysisProtocolError } from "../domain/analysisErrorCore.js";
+import { compareUnicodeCodePoints } from "../domain/unicodeCodePointOrder.js";
 import { AnalysisError } from "../domain/analysisErrorBase.js";
 import { err, ok, type Result } from "../domain/result.js";
 import {
@@ -32,6 +33,7 @@ import {
 import { ZipArtifactReader } from "../artifacts/ZipArtifactReader.js";
 import { OwnedFileHandle } from "../filesystem/OwnedFileHandle.js";
 import {
+  NonRegularFileReadError,
   openRegularFile,
   RegularFileAdmissionFailure,
   sameRegularFileState,
@@ -180,14 +182,27 @@ const mapInputFailure = (
       { max_metadata_read_bytes: APK_METADATA_READ_MAX_BYTES },
       { cause },
     );
-  const message = cause instanceof Error ? cause.message : String(cause);
   return new AnalysisInputError(operation, { cause }, [
     {
       path: ["path"],
       reason: "invalid_format",
-      message: `The APK could not be read as a package: ${path}: ${message}`,
+      message: inputFailureMessage(path, cause),
     },
   ]);
+};
+
+/** Name a missing or non-file selection instead of blaming package bytes. */
+const inputFailureMessage = (path: string, cause: unknown): string => {
+  if (
+    cause instanceof Error &&
+    "code" in cause &&
+    (cause.code === "ENOENT" || cause.code === "ENOTDIR")
+  )
+    return `Selected APK does not exist: ${path}`;
+  if (cause instanceof NonRegularFileReadError)
+    return `Selected APK is not a regular file: ${path}`;
+  const message = cause instanceof Error ? cause.message : String(cause);
+  return `The APK could not be read as a package: ${path}: ${message}`;
 };
 
 /** Provider-owned storage failures must never be attributed to caller input. */
@@ -759,7 +774,7 @@ export class FlutterBuildProvider {
           toolchain_capped: value.libflutter.toolchainCapped,
         },
       }))
-      .sort((left, right) => left.abi.localeCompare(right.abi));
+      .sort((left, right) => compareUnicodeCodePoints(left.abi, right.abi));
     const flutterDetected = abis.some((entry) => entry.libapp.present);
     const partial =
       abis.some(
@@ -871,7 +886,7 @@ export class FlutterBuildProvider {
             (left, right) =>
               (preference.indexOf(left.abi) + 1 || preference.length + 1) -
                 (preference.indexOf(right.abi) + 1 || preference.length + 1) ||
-              left.abi.localeCompare(right.abi),
+              compareUnicodeCodePoints(left.abi, right.abi),
           )[0]!
         : candidates.find((candidate) => candidate.abi === abi);
     if (selected === undefined)

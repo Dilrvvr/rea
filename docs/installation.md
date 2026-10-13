@@ -20,7 +20,9 @@ npx rea-agents setup
 Choose the agents to configure, review the proposed paths and changes, and
 approve the plan. npm's package-download approval and REA's setup approval are
 separate. Setup asks before changing agent configuration or installing Hopper.
-Restart the agents named in the completion message.
+Restart the agents named in the completion message. Quit Claude Desktop fully
+before approving, because a running app can overwrite the registration; on
+Windows, see [where Claude Desktop reads its configuration](client-configuration.md#claude-desktop).
 
 For the latest published release, use `npx rea-agents@latest setup`.
 [Package-runner and global-installation options](#package-runners-and-global-installation)
@@ -57,6 +59,10 @@ Hopper installation or any file write. Declining or pressing Ctrl-C makes no
 changes. Agent configuration writes preserve unrelated entries and comments,
 create backups, use atomic replacement, and verify their result. Setup and
 uninstall retain an existing `.rea.backup` rather than replacing the first snapshot.
+If that snapshot differs from the current configuration, setup previews and
+preserves a verified `.rea.backup.<sha256>.recovery` copy of the current bytes.
+Both snapshots remain available; a failed rollback reports the current recovery
+copy's path and the restore failure.
 Setup also retains valid environment overrides in REA's existing server entry,
 such as `REA_MCP_INPUT_SCHEMA_PROFILE` and `REA_MCP_MAX_RESPONSE_BYTES`.
 Detected provider settings replace only matching environment keys.
@@ -273,18 +279,20 @@ hosted connector; see [its configuration](client-configuration.md#other-client-s
 | GitHub Copilot CLI | `copilot_cli`    |
 | Command Code       | `commandcode`    |
 | Qwen Code          | `qwen_code`      |
+| Kimi Code          | `kimi`           |
 | VS Code            | `vscode`         |
 | Grok Build         | `grok_build`     |
 | OMP                | `omp`            |
 | Pi                 | `pi`             |
 | Hermes             | `hermes`         |
 | Qoder              | `qoder`          |
+| Factory Droid      | `droid`          |
 | Trae               | `trae`           |
 | ZCode              | `zcode`          |
 | DeepSeek Harness   | `dsh`            |
 
-`dsh` is main-only until a release after 6.4.0. The registry check above does
-not cover it.
+`dsh` and `kimi` require a release containing them. The registry check above does
+not cover them.
 
 See [client configuration and troubleshooting](client-configuration.md) for
 configuration paths, profiles, trust policies, and schema-limit workarounds.
@@ -303,9 +311,12 @@ Hopper is separate commercial software with its own license. Its free demo has
 vendor-defined limits, and a paid license is optional. REA reuses any detected
 installation and preserves Hopper during uninstall.
 
-The supported native host baseline is macOS 12+, Ubuntu 24.04+, Fedora 41+,
-Nobara 44+, 64-bit Arch Linux, CachyOS, or Omarchy. Ghidra and IDA have their own provider-specific
-host requirements; Windows Ghidra uses the [experimental P0 boundary](windows-ghidra-p0.md).
+The automated Hopper installer supports macOS 12+, Ubuntu 24.04+, Fedora 41+,
+Nobara 44+, 64-bit Arch Linux, CachyOS, or Omarchy. REA itself runs on any
+Linux distribution with a recognized apt, dnf, or pacman package family, where
+an existing Hopper launcher is selected through `HOPPER_LAUNCHER_PATH`. Ghidra
+and IDA have their own provider-specific host requirements; Windows Ghidra uses
+the [experimental P0 boundary](windows-ghidra-p0.md).
 
 On macOS, approved setup downloads the official DMG, checks its published size
 and digest, validates the application bundle, and atomically installs it to
@@ -317,8 +328,8 @@ The Hopper launcher action used by REA creates a document from an executable;
 its supported command-line interface does not attach to an already-open
 document. While another live REA session owns the same target and loader
 profile, a second session reports the owning run ID instead of opening a
-duplicate document. Closing the owning REA session releases this guard; Hopper
-keeps its document open. A later REA session can therefore open another
+duplicate document. On macOS, closing the owning REA session releases this guard;
+Hopper keeps its document open. A later REA session can therefore open another
 document for the same target. REA does not currently identify, focus, or reuse
 that existing GUI document, and the supported launcher exposes no attach or
 reuse action for it.
@@ -341,8 +352,14 @@ Hopper application per user across cooperating REA processes. A competing
 CLI or MCP session receives the owning session ID before Hopper is launched,
 for both the same target and a different target. Switch targets through that
 MCP session, or close it before starting another session. Closing the owner
-releases the reservation. This does not attach to or claim ownership of
-manually opened Hopper applications.
+releases the reservation and stops REA's owned demo application and private
+display; the headless Linux demo does not retain documents after MCP shutdown.
+Its helper watches a private lifetime pipe, so an owner crash or SIGKILL also
+stops those children, without relying on a reusable PID or a process-name scan.
+A later session recovers the dead owner's stale lease after child cleanup;
+private runtime files can remain when REA itself was killed. This does not attach to
+or claim ownership of manually opened Hopper applications. An application left
+running by an older REA version must still be closed before starting a new session.
 
 Stale lease recovery is serialized. If an interrupted recovery leaves its
 reservation directory, the diagnostic identifies that exact path. Stop REA
@@ -435,8 +452,9 @@ For cursor navigation, string decoding, symbol-name limits, and regex matching,
 see [Hopper analysis behavior](native-investigation.md#hopper-analysis-behavior).
 
 Closing or switching a target closes its bound Hopper document, shuts down REA's
-bridge and removes its temporary socket directory while preserving the Hopper
-application and unrelated documents. A `cleanup_incomplete`
+bridge and removes its temporary socket directory. The macOS Hopper application
+and unrelated documents remain open; the owned Linux demo application stops.
+A `cleanup_incomplete`
 result identifies resources whose cleanup could not be verified.
 REA retains unresolved cleanup ownership and any confirmed shutdown phases.
 After addressing the reported failure, retry `close_binary` on the same
@@ -501,7 +519,10 @@ and `set_addresses_names` name a function entry or any other mapped address
 session metadata edits leave executable bytes unchanged and are discarded on close. GUI controls
 require Hopper; Windows P0 remains read-only.
 
-Windows P0 admits native x86 and x86-64 PE applications and DLLs on fixed local NTFS volumes.
+Windows P0 admits native x86 and x86-64 PE applications and DLLs, plus explicitly
+selected [raw NMOS 6502 images](raw-binary.md#nmos-6502) with a caller-supplied
+entry at file offset 0, on fixed local NTFS volumes. Other raw CPU families remain
+unsupported on Windows.
 The npm package bundles native Job Object ownership, protected private runtime
 DACLs, and handle-based path admission; no separate addon installation is needed.
 See the [Windows Ghidra P0 guide](windows-ghidra-p0.md) for verified scope and

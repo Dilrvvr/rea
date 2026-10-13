@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   artifactInventorySummaryViewResultSchema,
+  machoSummaryViewResultSchema,
   managedArtifactSummaryViewResultSchema,
 } from "../domain/analysisView/analysisView.js";
 import { evidenceBundleSummarySchema } from "../domain/evidenceRecordSummary.js";
@@ -356,18 +357,20 @@ export const enhancedOutputSchemas: Readonly<Record<string, z.ZodObject>> = {
   binary_overview: evidenceResultOf(
     z.object({
       document: z.string(),
+      image_base: z.string().min(1).optional(),
       segments: z.array(
         z.object({
           name: z.string(),
           start: z.string(),
           end: z.string(),
           length: z.number().min(0),
+          image_base: z.string().exactOptional(),
+          address_space: z.string().exactOptional(),
         }),
       ),
       segment_count: z.number().int().min(0),
       procedure_count: z.number().int().min(0),
       string_count: z.number().int().min(0),
-      image_base: z.string().min(1).optional(),
     }),
   ),
   analyze_function: functionDossierOutput,
@@ -381,7 +384,9 @@ export const nativeOutputSchemas: Readonly<Record<string, z.ZodObject>> = {
   observe_native_ui: evidenceResultOf(nativeUiResultSchema),
   capture_native_ui_scenario: evidenceResultOf(nativeUiResultSchema),
   observe_native_calls: evidenceResultOf(nativeCallObservationResultSchema),
-  inspect_macho: evidenceResultOf(inspectMachoSchema),
+  inspect_macho: evidenceResultOf(
+    z.union([inspectMachoSchema, machoSummaryViewResultSchema]),
+  ),
   inspect_signature: evidenceResultOf(inspectSignatureSchema),
   inspect_plist: evidenceResultOf(inspectPlistSchema),
   list_architectures: evidenceResultOf(listArchitecturesSchema),
@@ -439,11 +444,11 @@ const lifecycleTargetFields = {
   path: z.string(),
   kind: targetKindSchema,
   sha256: z.string().regex(/^[a-f0-9]{64}$/u),
-  architecture: z.enum(BINARY_ARCHITECTURES).nullable(),
 };
 const detectedLifecycleTargetSchema = z.object({
   ...lifecycleTargetFields,
   format: targetFormatSchema.exclude(["raw-binary"]),
+  architecture: z.enum(BINARY_ARCHITECTURES).exclude(["6502"]).nullable(),
 });
 const rawLifecycleTargetSchema = z.object({
   ...lifecycleTargetFields,

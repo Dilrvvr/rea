@@ -25,6 +25,7 @@ beforeEach(async () => {
     HOME: home,
     USERPROFILE: home,
     APPDATA: join(home, "AppData", "Roaming"),
+    LOCALAPPDATA: join(home, "AppData", "Local"),
     CLAUDE_CONFIG_DIR: home,
     CODEX_HOME: join(home, ".codex"),
     COPILOT_HOME: join(home, ".copilot"),
@@ -123,6 +124,41 @@ describe("OMP integration maintenance", () => {
     await expect(
       existingMaintenanceScope(home, entryPoint, process.env),
     ).resolves.toMatchObject({ clients: ["grok_build"] });
+  });
+});
+
+describe("maintenance activation and layered configuration", () => {
+  it("leaves a natively disabled ZCode registration outside maintenance", async () => {
+    const configPath = await writeClient(
+      "zcode",
+      JSON.stringify({
+        mcp: {
+          servers: {
+            rea: { command: entryPoint, args: ["mcp"], enable: false },
+          },
+        },
+      }),
+    );
+    const original = await readFile(configPath, "utf8");
+    await expect(
+      existingMaintenanceScope(home, entryPoint, process.env),
+    ).resolves.toMatchObject({ clients: [] });
+    expect(await readFile(configPath, "utf8")).toBe(original);
+  });
+
+  it("selects an enabled registration inherited through layered OpenCode files", async () => {
+    const directory = join(home, ".config", "opencode");
+    await mkdir(directory, { recursive: true });
+    await writeFile(
+      join(directory, "opencode.json"),
+      JSON.stringify({
+        mcp: { rea: { type: "local", command: [entryPoint, "mcp"] } },
+      }),
+    );
+    await writeClient("opencode", JSON.stringify({ theme: "user-selected" }));
+    await expect(
+      existingMaintenanceScope(home, entryPoint, process.env),
+    ).resolves.toMatchObject({ clients: ["opencode"] });
   });
 });
 

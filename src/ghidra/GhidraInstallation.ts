@@ -72,6 +72,15 @@ const NATIVE_ARCHITECTURES: readonly {
 /** Bound installation discovery reads; larger headers remain unknown. */
 const EXECUTABLE_HEADER_PROBE_BYTES = 4096;
 
+/**
+ * Bound the Java version probe so a chatty or hostile JVM cannot force an
+ * unbounded in-memory capture. Well-behaved JVMs print a few kilobytes for
+ * `-XshowSettings:properties`; the same 1 MiB budget used for other Java
+ * listings leaves ample headroom. A probe that exceeds the budget yields no
+ * observation and is reported through the existing failed-probe path.
+ */
+const JAVA_PROBE_MAX_OUTPUT_BYTES = 1024 * 1024;
+
 /** Compatibility of one present native decompiler with the inspected host. */
 type NativeDecompilerCompatibility =
   | {
@@ -641,14 +650,20 @@ const versionCheck = (
   properties: GhidraApplicationProperties | undefined,
 ): GhidraInstallationCheck => {
   const raw = properties?.providerVersion;
+  const parseError = properties?.parseError;
   return installationCheck({
     name: "version",
-    passed: ghidraReleaseAccepted(raw),
+    passed: parseError == null && ghidraReleaseAccepted(raw),
     code:
-      ghidraReleaseCompatibility(raw).status === "unsupported"
-        ? "unsupported_version"
-        : "version_unresolved",
-    detail: ghidraVersionDetail(raw),
+      parseError != null
+        ? "version_unresolved"
+        : ghidraReleaseCompatibility(raw).status === "unsupported"
+          ? "unsupported_version"
+          : "version_unresolved",
+    detail:
+      parseError == null
+        ? ghidraVersionDetail(raw)
+        : `application.properties could not be parsed: ${parseError}`,
     remediation: `Install a Ghidra ${ghidraReleaseLine()} release (verified with ${SUPPORTED_GHIDRA_VERSION}), or update REA for another Ghidra line.`,
   });
 };
@@ -701,7 +716,9 @@ const javaRemediation = (
 const systemGhidraInstallationHost = (): GhidraInstallationHost => ({
   readText(path) {
     try {
-      return readFileSync(path, "utf8");
+      // Ghidra loads this file with Properties.load(InputStream), which maps
+      // bytes as ISO-8859-1 rather than decoding UTF-8.
+      return readFileSync(path).toString("latin1");
     } catch (cause: unknown) {
       // best-effort cleanup: optional install probing; unreadable means unknown.
       void cause;
@@ -755,7 +772,7 @@ const systemGhidraInstallationHost = (): GhidraInstallationHost => ({
         encoding: "utf8",
         env: environment,
         timeout: 5_000,
-        maxBuffer: Number.POSITIVE_INFINITY,
+        maxBuffer: JAVA_PROBE_MAX_OUTPUT_BYTES,
         windowsHide: true,
       },
     );
