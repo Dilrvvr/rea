@@ -7,6 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: write
   contents: write
 
 concurrency:
@@ -18,14 +19,43 @@ jobs:
     name: Sync main from morluto/rea
     if: github.repository == 'Dilrvvr/rea' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
     steps:
-      - name: Merge upstream changes without overwriting fork commits
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-        # GitHub preserves fork commits and fails if the merge conflicts.
+      - name: Keep only the sync workflow enabled
         run: |
-          gh api --method POST "repos/${GH_REPO}/merge-upstream" \
-            -f branch=main \
-            --jq '.message'
+          workflow_ids=$(gh api --paginate "repos/${GH_REPO}/actions/workflows?per_page=100" \
+            --jq '.workflows[] | select(.path != ".github/workflows/sync-upstream.yml" and .state == "active") | .id')
+          while IFS= read -r workflow_id; do
+            if [[ -n "$workflow_id" ]]; then
+              gh api --method PUT "repos/${GH_REPO}/actions/workflows/${workflow_id}/disable"
+            fi
+          done <<< "$workflow_ids"
+
+      - name: Check out the current fork branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          clean: false
+
+      - name: Merge upstream while preserving fork workflows
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --no-tags https://github.com/morluto/rea.git refs/heads/main
+          upstream_sha=$(git rev-parse --verify FETCH_HEAD)
+          python3 .github/fork-sync/merge_upstream.py "$upstream_sha"
+          git push origin HEAD:refs/heads/main
+
+      - name: Verify only the sync workflow is enabled
+        if: always()
+        run: |
+          active_paths=$(gh api --paginate "repos/${GH_REPO}/actions/workflows?per_page=100" \
+            --jq '.workflows[] | select(.state == "active") | .path')
+          if [[ "$active_paths" != ".github/workflows/sync-upstream.yml" ]]; then
+            printf 'Unexpected active workflows:\n%s\n' "$active_paths" >&2
+            exit 1
+          fi
