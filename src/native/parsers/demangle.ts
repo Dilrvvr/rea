@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { isSwiftMangledSymbolName } from "../../domain/swiftSymbolClassification.js";
+
 const resultSchema = z.object({
   input: z.string(),
   output: z.string(),
@@ -33,7 +35,7 @@ export const parseDemangledSymbols = (
       output: value,
       status:
         value === input
-          ? input.startsWith("$s") || input.startsWith("_$s")
+          ? isSwiftMangledSymbolName(input)
             ? "invalid"
             : "unchanged"
           : "demangled",

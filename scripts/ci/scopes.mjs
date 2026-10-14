@@ -3,6 +3,7 @@
 // every workflow.
 export const SCOPES = {
   reverse_tools: [
+    ".github/workflows/mutation.yml",
     "src/application/reverse/**",
     "src/application/binary/BinarySession.ts",
     "src/cutter/**",
@@ -23,6 +24,7 @@ export const SCOPES = {
     "tests/composition/analysis-sessions/binarySession.test.ts",
     "tests/boundary/filesystem/directAnalysisSnapshotReplay.test.ts",
     "tests/boundary/filesystem/reverseToolsMutationConfig.test.ts",
+    "tests/boundary/filesystem/mutationWorkflow.test.ts",
     "src/server/registerRizinDebugTools.ts",
     "tests/boundary/providers/CutterBridge*.test.ts",
     "tests/boundary/providers/cutterBridgeProducer.test.ts",
@@ -88,6 +90,13 @@ export const SCOPES = {
   ],
   // Four-host installed-package matrix and the Windows curated lane.
   package: [
+    ".github/actions/publish-mcp/**",
+    ".github/workflows/release-recovery.yml",
+    "scripts/ci/release-recovery.mjs",
+    "scripts/ci/verified-package.mjs",
+    "scripts/verify-published-package.mjs",
+    "tests/boundary/filesystem/releaseRecovery.test.ts",
+    "tests/boundary/filesystem/mcpRegistryPublication.test.ts",
     "src/windows/**",
     "native/windows/**",
     "src/process/capture/FilesystemSnapshot.ts",

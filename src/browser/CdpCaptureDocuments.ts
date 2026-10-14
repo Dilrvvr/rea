@@ -9,6 +9,12 @@ import {
   cdpStringValue,
   type UnknownRecord,
 } from "./CdpCaptureValues.js";
+import {
+  cdpSnapshotAttributesResolve,
+  cdpSnapshotString,
+  cdpSnapshotValueString,
+} from "./CdpSnapshotStrings.js";
+import type { BrowserExclusionReason } from "../domain/browserCompleteness.js";
 import { exclusionReasonForUrl } from "./CdpCaptureEventHelpers.js";
 import type { CdpCaptureCompleteness } from "./CdpCaptureCompleteness.js";
 import {
@@ -38,8 +44,8 @@ export const captureFrames = (
     return { items: [] };
   }
   const items: WebPageInspection["frames"] = [];
-  for (const tree of walkFrameTrees(root, () =>
-    completeness?.exclude("frames", "invalid_protocol_value"),
+  for (const tree of walkFrameTrees(root, (omittedCount) =>
+    completeness?.exclude("frames", "invalid_protocol_value", omittedCount),
   )) {
     const frame = recordValue(tree.frame);
     const frameId = cdpStringValue(frame?.id);
@@ -56,9 +62,16 @@ export const captureFrames = (
       continue;
     }
     if (maximum !== undefined && items.length >= maximum) continue;
+    const parentFrameId = cdpStringValue(frame.parentId);
+    // Only the enclosing tree's root may legitimately omit parent evidence.
+    if (
+      (tree !== root || Object.hasOwn(frame, "parentId")) &&
+      (parentFrameId === undefined || parentFrameId.length === 0)
+    )
+      completeness?.exclude("frames", "invalid_protocol_value");
     items.push({
       frame_id: frameId,
-      parent_frame_id: cdpStringValue(frame.parentId) ?? null,
+      parent_frame_id: parentFrameId ?? null,
       url: sanitized.url,
       origin: sanitized.origin,
     });
@@ -86,10 +99,19 @@ export const captureResources = (
     return { items: [] };
   }
   const items: CapturedResource[] = [];
-  for (const tree of walkFrameTrees(root, () =>
-    completeness?.exclude("resources", "invalid_protocol_value"),
+  for (const tree of walkFrameTrees(root, (omittedCount) =>
+    completeness?.exclude("resources", "invalid_protocol_value", omittedCount),
   )) {
-    for (const resource of recordsValue(tree.resources)) {
+    if (!Array.isArray(tree.resources)) {
+      completeness?.exclude("resources", "invalid_protocol_value", null);
+      continue;
+    }
+    for (const entry of tree.resources) {
+      const resource = recordValue(entry);
+      if (resource === undefined) {
+        completeness?.exclude("resources", "invalid_protocol_value");
+        continue;
+      }
       const url = allowedSanitizedUrl(resource.url, allowedOrigins);
       if (url === undefined || url.origin === null) {
         completeness?.exclude(
@@ -98,15 +120,26 @@ export const captureResources = (
         );
         continue;
       }
-      const contentSize = numberValue(resource.contentSize);
+      const type = cdpStringValue(resource.type);
+      const mimeType = cdpStringValue(resource.mimeType);
+      if (type === undefined || type.length === 0 || mimeType === undefined) {
+        completeness?.exclude("resources", "invalid_protocol_value");
+        continue;
+      }
+      const rawContentSize = numberValue(resource.contentSize);
+      const contentSize =
+        rawContentSize !== undefined && rawContentSize >= 0
+          ? rawContentSize
+          : null;
+      if (resource.contentSize !== undefined && contentSize === null)
+        completeness?.exclude("resources", "invalid_protocol_value");
       items.push({
         rawUrl: cdpStringValue(resource.url) ?? "",
         url: url.url,
         origin: url.origin,
-        type: cdpStringValue(resource.type) ?? "Other",
-        mime_type: cdpStringValue(resource.mimeType) ?? "",
-        content_size:
-          contentSize === undefined ? null : Math.max(0, contentSize),
+        type,
+        mime_type: mimeType,
+        content_size: contentSize,
       });
     }
   }
@@ -115,7 +148,7 @@ export const captureResources = (
 
 export const walkFrameTrees = function* (
   root: UnknownRecord,
-  onMalformedChild?: () => void,
+  onMalformedChild?: (omittedCount: number | null) => void,
 ): Generator<UnknownRecord> {
   const pending = [root];
   while (pending.length > 0) {
@@ -123,11 +156,11 @@ export const walkFrameTrees = function* (
     if (tree === undefined) return;
     const rawChildren = tree.childFrames;
     if (rawChildren !== undefined && !Array.isArray(rawChildren))
-      onMalformedChild?.();
+      onMalformedChild?.(null);
     const children = Array.isArray(rawChildren)
       ? rawChildren.flatMap((child) => {
           const parsed = recordValue(child);
-          if (parsed === undefined) onMalformedChild?.();
+          if (parsed === undefined) onMalformedChild?.(null);
           return parsed === undefined ? [] : [parsed];
         })
       : [];
@@ -182,27 +215,32 @@ export function* captureDom(
   let excludedUrls = 0;
   let total = 0;
   let unresolvedSvgNodes = 0;
-  for (const document of recordsValue(root.documents)) {
-    const documentUrl = indexedString(strings, document.documentURL);
+  if (!Array.isArray(root.strings))
+    excludeDocumentEvidence(completeness, "invalid_protocol_value", null);
+  for (const document of snapshotDocuments(root.documents, completeness)) {
+    const documentUrl = cdpSnapshotString(strings, document.documentURL);
     if (documentUrl === undefined) {
-      completeness?.exclude("dom", "invalid_protocol_value");
+      excludeDocumentEvidence(completeness, "invalid_protocol_value");
       continue;
     }
     if (allowedSanitizedUrl(documentUrl, allowedOrigins) === undefined) {
-      completeness?.exclude("dom", exclusionReasonForUrl(documentUrl));
+      excludeDocumentEvidence(completeness, exclusionReasonForUrl(documentUrl));
       continue;
     }
     const baseUrlValue =
       document.baseURL === undefined
         ? documentUrl
-        : indexedString(strings, document.baseURL);
+        : cdpSnapshotValueString(strings, document.baseURL);
     if (baseUrlValue === undefined) {
-      completeness?.exclude("dom", "invalid_protocol_value");
+      excludeDocumentEvidence(completeness, "invalid_protocol_value");
       continue;
     }
     const baseUrl = baseUrlValue || documentUrl;
     const documentNodes = recordValue(document.nodes);
-    if (documentNodes === undefined) continue;
+    if (documentNodes === undefined) {
+      excludeDocumentEvidence(completeness, "invalid_protocol_value");
+      continue;
+    }
     const rawNodeTypes = numberArray(documentNodes.nodeType);
     const rawNodeNames = numberArray(documentNodes.nodeName);
     const rawNodeValues = numberArray(documentNodes.nodeValue);
@@ -220,12 +258,12 @@ export function* captureDom(
       rawNodeValues.length !== rawNodeTypes.length ||
       rawParents.length !== rawNodeTypes.length
     ) {
-      completeness?.exclude("dom", "invalid_protocol_value");
+      excludeDocumentEvidence(completeness, "invalid_protocol_value");
       continue;
     }
     if (rawAttributes.length > rawNodeTypes.length)
-      completeness?.exclude(
-        "dom",
+      excludeDocumentEvidence(
+        completeness,
         "invalid_protocol_value",
         rawAttributes.length - rawNodeTypes.length,
       );
@@ -248,8 +286,8 @@ export function* captureDom(
       const nodeValueIndex = rawNodeValues[index];
       const parent = rawParents[index];
       const attributeIndexes = numberArray(rawAttributes[index]);
-      const nodeName = indexedString(strings, nodeNameIndex);
-      const nodeValue = indexedString(strings, nodeValueIndex);
+      const nodeName = cdpSnapshotString(strings, nodeNameIndex);
+      const nodeValue = cdpSnapshotValueString(strings, nodeValueIndex);
       if (
         nodeType === undefined ||
         nodeName === undefined ||
@@ -259,13 +297,9 @@ export function* captureDom(
         parent === index ||
         parent >= rawNodeTypes.length ||
         attributeIndexes === undefined ||
-        attributeIndexes.length % 2 !== 0 ||
-        attributeIndexes.some(
-          (value) =>
-            value === undefined || indexedString(strings, value) === undefined,
-        )
+        !cdpSnapshotAttributesResolve(strings, attributeIndexes)
       ) {
-        completeness?.exclude("dom", "invalid_protocol_value");
+        excludeDocumentEvidence(completeness, "invalid_protocol_value");
         continue;
       }
       const attributes = attributeIndexes as readonly number[];
@@ -344,6 +378,32 @@ export function* captureDom(
     unresolvedSvgNodes,
   };
 }
+
+/** Skipped document facts also make their derived URL and hint inventory incomplete. */
+const excludeDocumentEvidence = (
+  completeness: CdpCaptureCompleteness | undefined,
+  reason: BrowserExclusionReason,
+  count: number | null = 1,
+): void => {
+  completeness?.exclude("dom", reason, count);
+  completeness?.exclude("metadata", reason, count);
+};
+
+const snapshotDocuments = (
+  value: unknown,
+  completeness: CdpCaptureCompleteness | undefined,
+): readonly UnknownRecord[] => {
+  if (!Array.isArray(value) || value.length === 0) {
+    excludeDocumentEvidence(completeness, "invalid_protocol_value", null);
+    return [];
+  }
+  return value.flatMap((item) => {
+    const document = recordValue(item);
+    if (document === undefined)
+      excludeDocumentEvidence(completeness, "invalid_protocol_value");
+    return document === undefined ? [] : [document];
+  });
+};
 
 function* captureDomMetadata(
   pending: readonly PendingDomMetadata[],
@@ -514,16 +574,6 @@ const accessibilityStates = (
 const axText = (value: unknown): string | null =>
   cdpStringValue(recordValue(value)?.value) ?? null;
 
-const indexedString = (
-  strings: readonly (string | undefined)[],
-  index: unknown,
-): string | undefined => {
-  const integer = numberValue(index);
-  if (integer === undefined || !Number.isSafeInteger(integer) || integer < 0)
-    return undefined;
-  return strings[integer];
-};
-
 const uniqueAttributeNames = (
   attributeIndexes: readonly number[],
   strings: readonly (string | undefined)[],
@@ -531,7 +581,7 @@ const uniqueAttributeNames = (
   const names: string[] = [];
   const seen = new Set<string>();
   for (let index = 0; index < attributeIndexes.length; index += 2) {
-    const name = indexedString(strings, attributeIndexes[index]);
+    const name = cdpSnapshotString(strings, attributeIndexes[index]);
     if (name === undefined) continue;
     if (seen.has(name)) continue;
     seen.add(name);
@@ -597,8 +647,8 @@ const domMetadata = (
   const pairs = new Map<string, string>();
   for (let index = 0; index + 1 < attributes.length; index += 2) {
     // Chrome already folds HTML names; SVG/XML names remain case-sensitive.
-    const name = indexedString(strings, attributes[index]);
-    const value = indexedString(strings, attributes[index + 1]);
+    const name = cdpSnapshotString(strings, attributes[index]);
+    const value = cdpSnapshotValueString(strings, attributes[index + 1]);
     if (name === undefined || value === undefined) continue;
     // HTML keeps the first declaration. A later repeat must not move dom_urls.
     if (!pairs.has(name)) pairs.set(name, value);

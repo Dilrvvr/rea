@@ -360,6 +360,43 @@ describe("Interface Builder graph limits", () => {
   });
 });
 
+describe("Interface Builder hierarchy completeness", () => {
+  it("marks only the later document incomplete when its hierarchy root is omitted", () => {
+    const document = (relativePath: string, objectId: string) => ({
+      relativePath,
+      archiveSha256: hash,
+      documentKind: "nib" as const,
+      raw: {
+        "com.apple.ibtool.document.objects": {
+          [objectId]: { class: "UIView" },
+        },
+        "com.apple.ibtool.document.hierarchy": [{ objectID: objectId }],
+      },
+    });
+    const result = buildInterfaceBuilderAnalysis({
+      targetSha256: hash,
+      toolVersion: "test",
+      documents: [
+        document("First.nib", "first"),
+        document("Second.nib", "second"),
+      ],
+      limits: interfaceBuilderLimitsSchema.parse({ max_objects: 2 }),
+    });
+
+    expect(
+      result.documents.map(({ hierarchy_complete }) => hierarchy_complete),
+    ).toEqual([true, false]);
+    expect(result.graph.coverage).toContainEqual(
+      expect.objectContaining({
+        facet: "hierarchy:Second.nib",
+        status: "partial",
+        reason: "graph_limit_reached",
+        omitted: 1,
+      }),
+    );
+  });
+});
+
 describe("keyed archive object references", () => {
   it("keeps referenced objects as stubs so shared and cyclic references stay finite", () => {
     // Each view references its window, superview, and next key view, so
