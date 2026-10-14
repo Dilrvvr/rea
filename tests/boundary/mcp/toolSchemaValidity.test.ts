@@ -9,6 +9,7 @@ import { TOOL_CONTRACTS } from "../../../src/contracts/toolContracts.js";
 import { emptyArraySchema } from "../../../src/domain/emptyArraySchema.js";
 import { processScenarioSchema } from "../../../src/domain/process/processScenario.js";
 import { GENERATED_MCP_TOOL_CATALOG } from "../../fixtures/mcpToolCatalog.js";
+import { arrayItemSchemaError } from "../../fixtures/mcpClientSchemaConstraints.js";
 import { toolRegistrationOptions } from "../../../src/server/toolRegistrationOptions.js";
 
 interface ToolSchemas {
@@ -35,7 +36,11 @@ function schemaErrors(tools: readonly ToolSchemas[]): string[] {
         if (!ajv.validateSchema(schema))
           return [`${tool.name}.${kind}: ${ajv.errorsText(ajv.errors)}`];
         ajv.compile(schema);
-        return [];
+        const clientError = arrayItemSchemaError(
+          schema,
+          `${tool.name}.${kind}`,
+        );
+        return clientError === undefined ? [] : [clientError];
       } catch (cause: unknown) {
         return [
           `${tool.name}.${kind}: ${cause instanceof Error ? cause.message : String(cause)}`,
@@ -764,6 +769,26 @@ it("validates each tool independently when output schema IDs repeat", () => {
   expect(errors).toHaveLength(1);
   expect(errors[0]).toContain("broken.outputSchema");
   expect(errors[0]).toContain("missing");
+});
+
+it("checks client array constraints in schema positions while preserving literal metadata", () => {
+  const schema = {
+    type: "object",
+    properties: { examples: { type: "array", items: { type: "string" } } },
+    examples: [{ type: "array" }],
+    default: { type: "array" },
+    const: { type: "array" },
+    enum: [{ type: "array" }],
+  };
+  expect(arrayItemSchemaError(schema, "literal")).toBeUndefined();
+  expect(
+    arrayItemSchemaError(
+      { ...schema, properties: { examples: { type: "array" } } },
+      "broken",
+    ),
+  ).toBe(
+    "broken.properties.examples: tool parameters array type must have items",
+  );
 });
 
 it.each([false, true])(
