@@ -114,6 +114,14 @@ export class HopperProvider implements AnalysisProviderCandidate {
         reason: `Hopper cannot directly analyze ${target.kind} targets.`,
         diagnostics,
       };
+    if (target.kind === "database" && this.platform === "darwin")
+      return {
+        status: "unsupported",
+        code: "target_kind_unsupported",
+        reason:
+          "This Hopper macOS launcher cannot start REA's analysis bridge when opening a saved Hopper database. Open an executable target instead; saved-database analysis is unavailable until Hopper exposes a database launch route that runs the bridge script.",
+        diagnostics,
+      };
     if (target.kind === "database")
       return {
         status: "supported",
@@ -126,7 +134,11 @@ export class HopperProvider implements AnalysisProviderCandidate {
         status: "unsupported",
         code: "architecture_unsupported",
         reason: `REA's Hopper adapter does not admit ${
-          target.architecture === "mips" ? "MIPS" : "RISC-V"
+          target.architecture === "mips"
+            ? "MIPS"
+            : target.architecture === "riscv"
+              ? "RISC-V"
+              : "PowerPC"
         } targets.`,
         diagnostics,
       };
@@ -268,7 +280,8 @@ export class HopperProvider implements AnalysisProviderCandidate {
         rawResult,
         ...(profile === undefined ? {} : { analysisProfile: profile }),
         ...(operation === "procedure_callers" ||
-        operation === "procedure_callees"
+        operation === "procedure_callees" ||
+        operation === "analyze_function"
           ? { relationshipCoverage: { status: "complete" as const } }
           : {}),
         limitations: [

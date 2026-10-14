@@ -1,4 +1,5 @@
 import * as t from "@babel/types";
+import { runtimeFunctionParameters } from "./javascriptAstValues.js";
 import { javascriptBootstrapAt } from "./javascriptBootstrap.js";
 import {
   resolveSemanticBindingState,
@@ -31,6 +32,7 @@ import type {
   JavaScriptBundlerModule,
   JavaScriptBundlerRegistration,
 } from "./javascriptStaticAnalysisTypes.js";
+import { JAVASCRIPT_AST_FINGERPRINT_ALGORITHM } from "./javascriptStaticAnalysisTypes.js";
 
 /** Inspect a bundler registration call and recover its module table. */
 export const inspectBundlerRegistration = (
@@ -268,7 +270,7 @@ const recoverBundlerModule = (
       factory_require_name: requireName,
       source_sha256: sha256Text(sourceSlice(source, factory)),
       structural_fingerprint_sha256: fingerprint,
-      structural_fingerprint_algorithm: "babel-ast-v1",
+      structural_fingerprint_algorithm: JAVASCRIPT_AST_FINGERPRINT_ALGORITHM,
       exports: exportsValue.values,
       location: range(factory),
     },
@@ -304,7 +306,7 @@ const runtimeMetadata = (node: t.Node | null | undefined): RuntimeMetadata => {
       asyncChunkKeys: [],
       unknownAsyncChunkKeys: 0,
     };
-  const parameter = node.params[0];
+  const parameter = runtimeFunctionParameters(node)[0];
   const requireName = t.isIdentifier(parameter) ? parameter.name : null;
   if (requireName === null)
     return {

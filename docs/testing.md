@@ -19,7 +19,7 @@ behavior, and complete CI evidence before merging.
 | `npm run test:boundary`           | Boundary, CLI boundary, MCP boundary, process boundary, and process-global projects                                     |
 | `npm run test:mcp`                | MCP boundary project                                                                                                    |
 | `npm run test:acceptance`         | Complete compiled CLI and MCP acceptance workflows                                                                      |
-| `npm run test:python`             | LLDB producer retention and launch contracts with a fake LLDB API; no native debugger required                          |
+| `npm run test:python`             | LLDB and mitmproxy producer contracts plus analysis-efficiency checks; no real debugger or proxy required               |
 | `npm run test:watch`              | Dirty source tests in watch mode, without build                                                                         |
 | `npm run test:watch:all`          | Changed tests from every project; builds at startup, so rebuild after production edits before relying on compiled tests |
 | `npm run check:changed`           | Cached typecheck/lint and branch-related source feedback                                                                |
@@ -280,8 +280,15 @@ focused suite also exercises affected MCP routes and the Python Cutter bridge.
 Contract, integration, and real-provider lanes complement these focused tests;
 simulated providers do not establish real-provider behavior.
 
-CI runs six native Vitest shards without retries. Each shard emits a blob
-report; the merge job produces JUnit and JSON diagnostics, a module timing
+Fast CI starts the source-only projects after classification, independently of
+build and static checks, and runs five built-dependent shards after the build.
+The six test jobs still select every portable test. Full qualification keeps six
+complete Vitest shards with coverage. Neither tier retries tests. Canonical
+project ownership lives in `scripts/lib/test-projects.mjs`, shared by Vitest,
+CI group execution, and development-test preparation. A test importing compiled
+verifier code belongs to the built group even if its directory is conformance.
+Source and built blobs have separate labels to prevent merge collisions.
+Each test job emits a blob report; the merge job produces JUnit and JSON diagnostics, a module timing
 report, plus aggregate coverage during full qualification. It retains available
 reports even when a shard fails, uploads available diagnostics, and writes the
 slowest files to the workflow summary. Partial reports are marked diagnostic
@@ -315,6 +322,30 @@ for static checks, builds, docs, and report merging, and thirty minutes per
 portable test shard. These limits leave headroom for cold setup and full coverage
 while preventing a hung job from holding the active main run for hours. They do
 not bound runner queue waiting. Timeouts still fail the required gate.
+
+The separate `CI timings` workflow also diagnoses missing, startup-failed,
+queued/running, approval-required, canceled, and failed PR CI through bounded,
+read-only API scans. Incomplete pagination or changing identity stays unknown.
+It never closes/reopens PRs, reruns workflows, posts comments, or changes gates.
+The timing manifest retains each run's event and head branch, including explicit
+unknowns, so PR runs cannot consume the eligible-main comparison budget.
+Its static failure report compares supported lint/duplication diagnostics with
+failed main runs using exact source, ancestry, task hashes, and toolchain proof.
+A match describes those diagnostics only; it does not establish that every
+failure in a job came from main. Duplication reports retain the actual checker
+exit result, so passing duplication checks preserve lint failures and caller
+thresholds remain owned by the producer. Missing checker outcomes leave
+those duplication diagnostics unclassified. Missing historical receipts remain unknown.
+The reporter executes only trusted default-branch code and parses whitelisted
+JSON artifact members without executing artifact content. Reports and limits
+are retained in `ci-health-diagnostics`; its ten-minute job limit covers the
+existing four-minute timing collection plus the bounded diagnostic stages.
+
+Shard-count reduction remains deferred: the available successful timing sample
+covers an older inventory, and file phase weights are not job wall time. The
+one-source/five-built split retains six test jobs; it makes no hosted speedup
+claim. Current complete timings and completed candidate hosted runs are needed
+before enabling a smaller adaptive matrix.
 
 The separate `CI timings` workflow batches recent completed CI and Release runs
 hourly or on manual dispatch. It uploads `ci-job-timings-batch` with raw API pages and
@@ -418,8 +449,9 @@ adds in-place reparse, breakaway, environment, and token observations.
 The separate `scripts/verify-windows-native-inspection.mjs` lane uses the
 `.cache/windows-native-inspection-fixture` artifact built on Linux with
 `node scripts/build-windows-native.mjs --inspection-fixture`. Its controlled
-first deletion failure checks retained NTFS ownership, later-query recovery,
-successful-admission caching, and environment-teardown cleanup. It neither
+first deletion failure checks retained NTFS ownership across a same-volume
+rename, later-query handle-based recovery, successful-admission caching, and
+environment-teardown cleanup. It neither
 establishes the cause of the intermittent #1701 host failure nor replaces
 verification with the shipped production artifact.
 `npm run verify:ghidra:windows:package` additionally packs and installs REA into

@@ -8,11 +8,13 @@ import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { CdpBrowserProvider } from "../../dist/browser/CdpBrowserProvider.js";
+import { listBrowserTargetsInputSchema } from "../../dist/domain/browserObservation.js";
 import { CdpConnection } from "../../dist/browser/CdpConnection.js";
 import { parseEvidence } from "../../dist/domain/evidence.js";
 import { webExecutionSchema } from "../../dist/domain/webExecution.js";
 import { webEventListenersSchema } from "../../dist/domain/webEventListeners.js";
 import { startBrowserRuntimeSite } from "../fixtures/browser-runtime-site.mjs";
+import { requireOrdinaryWindowsVerifierCaller } from "./windows-ordinary-user-verifier.mjs";
 import { mcpTextValue } from "./mcp-verifier-results.mjs";
 import {
   startRuntimeFixtureBrowser,
@@ -36,6 +38,7 @@ export async function verifyBrowserRuntime(
   executable,
   entrypoint = fileURLToPath(new URL("../rea.mjs", import.meta.url)),
 ) {
+  await requireOrdinaryWindowsVerifierCaller();
   await access(executable);
   const site = await startBrowserRuntimeSite();
   let fixture;
@@ -45,10 +48,12 @@ export async function verifyBrowserRuntime(
   try {
     fixture = await startRuntimeFixtureBrowser(executable, site.origin);
     const endpoint = `http://127.0.0.1:${fixture.port}`;
-    const targets = await new CdpBrowserProvider().listTargets({
-      cdp_endpoint: endpoint,
-      allowed_origins: [site.origin],
-    });
+    const targets = await new CdpBrowserProvider().listTargets(
+      listBrowserTargetsInputSchema.parse({
+        cdp_endpoint: endpoint,
+        allowed_origins: [site.origin],
+      }),
+    );
     if (!targets.ok) throw targets.error;
     const target = targets.value.targets[0];
     assert.ok(target, "owned fixture page target missing");
