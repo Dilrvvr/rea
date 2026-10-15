@@ -30,7 +30,9 @@ export interface FakeKunaBehavior {
     | "hang"
     | "miscounted"
     | "silent"
-    | "block-manifest";
+    | "block-manifest"
+    /** Writes more than REA's 8 MiB export output buffer before its summary. */
+    | "noisy";
   readonly functions?: readonly FakeKunaFunction[];
   /** Extra `.asm` bytes, for capacity tests. */
   readonly asmPadding?: number;
@@ -39,6 +41,8 @@ export interface FakeKunaBehavior {
   readonly decompile?: "ok" | "hang";
   /** Milliseconds one `decompile --addr` run takes before printing. */
   readonly decompileDelayMs?: number;
+  /** Extra comment bytes in each `decompile --addr` text, for retention budgets. */
+  readonly decompilePadding?: number;
   /** Milliseconds `functions --json` takes before printing. */
   readonly inventoryDelayMs?: number;
   /** Milliseconds the export takes before writing its files. */
@@ -149,6 +153,7 @@ if (args[0] === "--version") {
     if (mode === "block-manifest") fs.mkdirSync(path.join(output, "..", "manifest.json"));
     const failed = functions.filter((fn) => fn.error !== undefined).length;
     const reported = mode === "miscounted" ? functions.length + 1 : functions.length - failed;
+    if (mode === "noisy") process.stdout.write(Buffer.alloc(9 * 1024 * 1024, 0x20));
     if (mode !== "silent") process.stdout.write("wrote " + output + ": " + stem + ".c (" + c.length + " bytes); functions: " + reported + " ok, " + failed + " failed\n");
   }, behavior.delayMs ?? 0);
 } else if (args[0] === "decompile") {
@@ -157,7 +162,8 @@ if (args[0] === "--version") {
   if (behavior.decompile === "hang") hang();
   else if (fn === undefined) { process.stderr.write("error: no function at " + args[2] + "\n"); process.exit(1); }
   else setTimeout(() => {
-    process.stdout.write("int " + fn.name + "(void) // single-function\n{\n  return 0;\n}\n");
+    const padding = behavior.decompilePadding === undefined ? "" : "/*" + "x".repeat(behavior.decompilePadding) + "*/\n";
+    process.stdout.write("int " + fn.name + "(void) // single-function\n" + padding + "{\n  return 0;\n}\n");
     fs.appendFileSync(__filename + ".exits", JSON.stringify({ pid: process.pid, at: Date.now() }) + "\n");
   }, behavior.decompileDelayMs ?? 0);
 } else {
