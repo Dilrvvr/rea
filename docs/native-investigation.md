@@ -270,7 +270,9 @@ Mach-O image. Architecture
 `file_offset` values are container-relative. Entrypoint, segment and section
 `file_offset` values retain their source meaning and are relative to the
 selected Mach-O slice. Raw load-command fields retain their original values.
-Evidence locations map the LC_MAIN entrypoint and nonempty file-backed segment
+A field otool prints more than once, such as each `LC_BUILD_VERSION` tool, is
+keyed `name #n` in print order. Each `LC_LINKER_OPTION` string is keyed
+`string #n` and checked against the declared `count`. Evidence locations map the LC_MAIN entrypoint and nonempty file-backed segment
 ranges to container offsets by adding the observed slice offset. Zero-fill
 segments do not produce file ranges. When the selected slice's container offset
 is unknown, those mapped locations are omitted with an explicit limitation;
@@ -378,7 +380,12 @@ complete observation.
   property: `N` means `nonatomic`; a complete typed attribute string without
   `N` means the Objective-C default `atomic`;
   missing or incomplete attribute metadata leaves `atomicity` and any
-  unestablished read-only value null. `is_meta_class`, `is_root_class`, and
+  unestablished read-only value null. A type attribute whose quoted class name
+  never closes is incomplete and marks `objc_properties_categories` partial
+  with `property_attributes_incomplete`. A property record that cannot be
+  decoded, such as one with an empty or unmapped name, is reported as
+  `property_decode_failed` at its entry address while sibling properties are
+  retained. `is_meta_class`, `is_root_class`, and
   `ivar_count` are also nullable when the selected provider exposes only symbol
   names. Class implementation methods have null `is_required` and `is_optional`
   fields because those facts apply to protocol declarations; decoded protocol
@@ -490,7 +497,7 @@ is present. A denied trace reports the `debugger-attach-denied` reason.
 Install a Ghidra 12.1.x release and the 64-bit full JDK it declares, then configure REA to
 use them. Ghidra analysis supports Linux x64/arm64 and macOS x64/arm64; each installation requires
 the matching native decompiler. Experimental Windows x64 P0 admits native
-x86 and x86-64 PE applications and DLLs, plus explicitly selected
+x86, x86-64, ARMNT (Thumb-2) and ARM64 PE applications and DLLs, plus explicitly selected
 [raw NMOS 6502 images](raw-binary.md#nmos-6502) with a caller-supplied load address,
 on fixed local NTFS volumes. Other raw CPU families remain unsupported on Windows.
 The boundary uses bundled Job Object ownership, protected runtime DACLs, and

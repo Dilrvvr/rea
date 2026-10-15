@@ -23,7 +23,7 @@ interface PendingCommand {
   readonly sessionId?: string;
   readonly resolve: (value: unknown) => void;
   readonly reject: (error: AnalysisError) => void;
-  readonly removeAbort: () => void;
+  readonly dispose: () => void;
 }
 
 /** Correlated JSON-RPC transport for one CDP target operation. */
@@ -79,6 +79,8 @@ export class CdpConnection {
         `CDP maxPayloadBytes must be a positive safe integer no greater than ${String(MAX_WEBSOCKET_PAYLOAD_BYTES)}.`,
       );
     const socket = new WebSocket(url, {
+      // waitForOpen owns the deadline, cancellation, cleanup, and typed errors;
+      // keep ws's timer disabled so handshake failures have one owner.
       handshakeTimeout: 0,
       maxPayload: maxPayloadBytes,
       perMessageDeflate: false,
@@ -115,7 +117,7 @@ export class CdpConnection {
     return () => this.#protocolFailureListeners.delete(listener);
   }
 
-  /** Execute one command, optionally within a flat target session. */
+  /** Bound each response separately from the caller-selected observation window. */
   async send(
     method: string,
     params: Readonly<Record<string, unknown>> = {},
@@ -130,41 +132,51 @@ export class CdpConnection {
       throw new AnalysisCancelledError(this.operation);
     const id = this.#nextId;
     this.#nextId += 1;
+    const message = JSON.stringify({
+      id,
+      method,
+      params,
+      ...(sessionId === undefined ? {} : { sessionId }),
+    });
     return await new Promise((resolve, reject) => {
       const onAbort = (): void => {
         const pending = this.#pending.get(id);
         if (pending === undefined) return;
-        pending.removeAbort();
-        this.#pending.delete(id);
+        this.#complete(id, pending);
         reject(new AnalysisCancelledError(this.operation));
       };
+      const timer = setTimeout(() => {
+        const pending = this.#pending.get(id);
+        if (pending === undefined) return;
+        this.#complete(id, pending);
+        reject(
+          new BrowserObservationError(this.operation, "timeout", {
+            detail: `CDP command ${method} exceeded its ${String(WEB_RUNTIME_LIMITS.commandTimeoutMs)} ms response deadline.`,
+          }),
+        );
+      }, WEB_RUNTIME_LIMITS.commandTimeoutMs);
       signal?.addEventListener("abort", onAbort, { once: true });
       this.#pending.set(id, {
         method,
         ...(sessionId === undefined ? {} : { sessionId }),
         resolve,
         reject,
-        removeAbort: () => signal?.removeEventListener("abort", onAbort),
-      });
-      this.socket.send(
-        JSON.stringify({
-          id,
-          method,
-          params,
-          ...(sessionId === undefined ? {} : { sessionId }),
-        }),
-        (error) => {
-          if (error === undefined || error === null) return;
-          const pending = this.#pending.get(id);
-          if (pending === undefined) return;
-          this.#complete(id, pending);
-          reject(
-            new BrowserObservationError(this.operation, "disconnected", {
-              cause: error,
-            }),
-          );
+        dispose: () => {
+          clearTimeout(timer);
+          signal?.removeEventListener("abort", onAbort);
         },
-      );
+      });
+      this.socket.send(message, (error) => {
+        if (error === undefined || error === null) return;
+        const pending = this.#pending.get(id);
+        if (pending === undefined) return;
+        this.#complete(id, pending);
+        reject(
+          new BrowserObservationError(this.operation, "disconnected", {
+            cause: error,
+          }),
+        );
+      });
     });
   }
 
@@ -242,10 +254,20 @@ export class CdpConnection {
     if (pending === undefined) return;
     const hasResult = "result" in message;
     const hasError = "error" in message;
+    // Chromium cannot route a rejection through a flat session after that
+    // session disappears. Its browser-level reply omits sessionId, but the
+    // connection-global command id still binds this exact terminal error.
+    const detachedSessionError =
+      pending.sessionId !== undefined &&
+      !("sessionId" in message) &&
+      hasError &&
+      isRecord(message.error) &&
+      message.error.code === -32_001 &&
+      message.error.message === "Session with given id not found.";
     if (
       (pending.sessionId === undefined
         ? "sessionId" in message
-        : message.sessionId !== pending.sessionId) ||
+        : message.sessionId !== pending.sessionId && !detachedSessionError) ||
       hasResult === hasError
     ) {
       this.#failPending("protocol_error");
@@ -282,7 +304,7 @@ export class CdpConnection {
   }
 
   #complete(id: number, pending: PendingCommand): void {
-    pending.removeAbort();
+    pending.dispose();
     this.#pending.delete(id);
   }
 
@@ -370,11 +392,21 @@ const waitForOpen = async (
       onFailure(new AnalysisCancelledError(operation));
     };
     const cleanup = (): void => {
+      clearTimeout(timer);
       socket.off("open", onOpen);
       socket.off("error", onFailure);
       socket.off("close", onClose);
       signal?.removeEventListener("abort", onAbort);
     };
+    const timer = setTimeout(() => {
+      terminateSocket(socket);
+      cleanup();
+      reject(
+        new BrowserObservationError(operation, "timeout", {
+          detail: `CDP WebSocket handshake exceeded its ${String(WEB_RUNTIME_LIMITS.commandTimeoutMs)} ms deadline.`,
+        }),
+      );
+    }, WEB_RUNTIME_LIMITS.commandTimeoutMs);
     socket.once("open", onOpen);
     socket.once("error", onFailure);
     socket.once("close", onClose);
