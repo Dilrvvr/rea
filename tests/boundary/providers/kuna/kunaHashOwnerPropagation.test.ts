@@ -145,7 +145,7 @@ it
 );
 
 it.skipIf(process.platform === "win32")(
-  "keeps cancellation primary when an executable hash read and close both fail",
+  "keeps the physical hash read failure primary when cancellation and close failure follow",
   async () => {
     const fixture = await session("rea-kuna-cancelled-read-close-");
     const installed = await inspectKunaInstallationOwned({
@@ -174,9 +174,15 @@ it.skipIf(process.platform === "win32")(
       if (result.ok) throw new Error("injected cancelled read passed");
       originatingError = result.error;
       expect(result.error).toMatchObject({
-        _tag: "AnalysisCancelledError",
+        _tag: "ProviderAdapterError",
         cleanupIncomplete: true,
         cleanupResources: [installed.value.executable],
+        diagnostics: {
+          primary_error: {
+            code: "execution_failure",
+            message: expect.stringContaining("injected read fault"),
+          },
+        },
       });
     } finally {
       injected.failReadStage = undefined;
@@ -462,12 +468,12 @@ it
         cleanupIncomplete: true,
         cleanupResources: [fixture.kuna],
       });
-      expect(binary.status()).toMatchObject({ cleanup_pending: true });
+      expect(await binary.status()).toMatchObject({ cleanup_pending: true });
 
       expect(await binary.close()).toEqual({ ok: true, value: null });
       expect(originatingError.cleanupIncomplete).toBe(false);
       expect(injected.closeCalls).toBe(stage === "fingerprint" ? 2 : 3);
-      expect(binary.status()).toMatchObject({ cleanup_pending: false });
+      expect(await binary.status()).toMatchObject({ cleanup_pending: false });
     } finally {
       injected.failCloseReadStage = undefined;
       const closed = await binary.close();
@@ -495,7 +501,7 @@ it.skipIf(process.platform === "win32")(
       cleanupResources: [fixture.kuna],
     });
     expect(injected.closeCalls).toBe(1);
-    expect(binary.status()).toMatchObject({
+    expect(await binary.status()).toMatchObject({
       open: false,
       cleanup_pending: true,
     });
@@ -504,12 +510,12 @@ it.skipIf(process.platform === "win32")(
       error: { cleanupIncomplete: true, cleanupResources: [fixture.kuna] },
     });
     expect(injected.closeCalls).toBe(2);
-    expect(binary.status()).toMatchObject({ cleanup_pending: true });
+    expect(await binary.status()).toMatchObject({ cleanup_pending: true });
 
     injected.releaseCloseFailures = true;
     expect(await binary.close()).toEqual({ ok: true, value: null });
     expect(injected.closeCalls).toBe(3);
-    expect(binary.status()).toMatchObject({ cleanup_pending: false });
+    expect(await binary.status()).toMatchObject({ cleanup_pending: false });
     expect((await fakeKunaCalls(fixture.kuna)).map(({ argv }) => argv)).toEqual(
       [["--version"], ["--version"]],
     );
@@ -577,7 +583,7 @@ it.skipIf(process.platform === "win32")(
         ok: false,
         error: { cleanupIncomplete: true, cleanupResources: [retired] },
       });
-      expect(binary.status()).toMatchObject({
+      expect(await binary.status()).toMatchObject({
         open: false,
         cleanup_pending: true,
       });
@@ -586,7 +592,7 @@ it.skipIf(process.platform === "win32")(
       );
       await chmod(retired, 0o700);
       expect(await binary.close()).toEqual({ ok: true, value: null });
-      expect(binary.status()).toMatchObject({ cleanup_pending: false });
+      expect(await binary.status()).toMatchObject({ cleanup_pending: false });
       await expect(readFile(join(retired, "evidence"))).rejects.toMatchObject({
         code: "ENOENT",
       });
