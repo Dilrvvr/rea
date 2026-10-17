@@ -90,6 +90,7 @@ const SUPPORTED_ARCHITECTURES = new Set([
   "riscv",
   "powerpc",
   "m68k",
+  "hexagon",
 ]);
 
 /** Ghidra candidate backed by an isolated ephemeral headless import. */
@@ -112,7 +113,7 @@ export class GhidraProvider implements AnalysisProviderCandidate {
       this.#inspectionResources.retain({
         kind: "lease",
         resource,
-        lease: new AnalysisCleanupLease(() => owner.close(), [resource]),
+        lease: AnalysisCleanupLease.forCloseOwner(owner, resource),
       }),
     run: (operation) => this.#inspectionResources.run(operation),
   };

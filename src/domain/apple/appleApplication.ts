@@ -28,6 +28,7 @@ import {
 import {
   projectedComponentSchema,
   projectedInventoryEntries,
+  projectedFileComponents,
   projectionDigest,
   unavailableComponentSchema,
   type ProjectedInventoryEntry,
@@ -119,9 +120,7 @@ export const projectAppleApplication = (
   );
   const rootFormat = appleRootFormat(inventory.manifest.root_format);
   const entries = projectedInventoryEntries(inventory);
-  const inventoried = entries.flatMap(({ component }) =>
-    component === undefined ? [] : [component],
-  );
+  const inventoried = projectedFileComponents(entries);
   const { roots, bundles } = projectAppleBundleAnatomy(entries, {
     name: evidence[0]?.subject?.name ?? "",
     format: rootFormat,
@@ -242,6 +241,14 @@ const appleRootFormat = (format: string): RootFormat => {
 const isNativeLibrary = (path: string): boolean =>
   /\.(?:dylib|so)$/iu.test(path);
 
+const launchdDomain = (path: string): "agent" | "daemon" | undefined => {
+  if (anatomyTailMatches(path, ["Contents", "Library", "LaunchAgents", "*"]))
+    return "agent";
+  if (anatomyTailMatches(path, ["Contents", "Library", "LaunchDaemons", "*"]))
+    return "daemon";
+  return undefined;
+};
+
 const classifyComponents = (
   entries: readonly ProjectedInventoryEntry[],
   all: readonly Component[],
@@ -281,29 +288,12 @@ const classifyComponents = (
     privileged_helpers: matching((path) =>
       anatomyTailMatches(path, ["Contents", "Library", "LaunchServices", "*"]),
     ),
-    launchd_plists: matching(
-      (path) =>
-        path.endsWith(".plist") &&
-        (anatomyTailMatches(path, [
-          "Contents",
-          "Library",
-          "LaunchAgents",
-          "*",
-        ]) ||
-          anatomyTailMatches(path, [
-            "Contents",
-            "Library",
-            "LaunchDaemons",
-            "*",
-          ])),
-    ).map((component) => ({
-      ...component,
-      domain: component.path
-        .split("/")
-        .some((segment) => anatomyNameIs(segment, "LaunchDaemons"))
-        ? ("daemon" as const)
-        : ("agent" as const),
-    })),
+    launchd_plists: matching((path) => path.endsWith(".plist")).flatMap(
+      (component) => {
+        const domain = launchdDomain(component.path);
+        return domain === undefined ? [] : [{ ...component, domain }];
+      },
+    ),
     helpers: matching((path) =>
       anatomyTailMatches(path, ["Contents", "Helpers", "*"]),
     ),
