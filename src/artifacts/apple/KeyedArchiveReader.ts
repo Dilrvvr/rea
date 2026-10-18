@@ -6,7 +6,12 @@ import {
   AnalysisInputError,
   AnalysisUnsupportedTargetError,
 } from "../../domain/analysisErrorCore.js";
-import { unknownDateLimitation } from "../../domain/apple/plistValue.js";
+import {
+  negativeZeroRealLimitation,
+  nonFiniteRealLimitation,
+  unknownDateLimitation,
+  unknownRealLimitation,
+} from "../../domain/apple/plistValue.js";
 import { createPlistNumberProjection } from "../../domain/apple/plistNumbers.js";
 import {
   decodeBinaryPlistNumbers,
@@ -82,10 +87,13 @@ export const decodeKeyedArchiveBytes = (
             : 0,
         }
       : parseXmlPropertyList(xmlText ?? "");
-  const { unknownRealCount, unknownDateCount, ...graph } = projectKeyedArchive(
-    parsed.value,
-    selection,
-  );
+  const {
+    nonFiniteRealCount,
+    unknownRealCount,
+    negativeZeroRealCount,
+    unknownDateCount,
+    ...graph
+  } = projectKeyedArchive(parsed.value, selection);
   const numbers = createPlistNumberProjection(parsed.numberLiterals);
   // Classify the serialized graph before projecting values to typed decimals.
   // Numeric IDs, node kinds, references and pagination retain their original meaning.
@@ -110,11 +118,15 @@ export const decodeKeyedArchiveBytes = (
       ...(parsed.omittedPrototypeKeys === 0
         ? []
         : [omittedPrototypeKeysLimitation(parsed.omittedPrototypeKeys)]),
+      ...(nonFiniteRealCount === 0
+        ? []
+        : [nonFiniteRealLimitation(nonFiniteRealCount)]),
       ...(unknownRealCount === 0
         ? []
-        : [
-            `${String(unknownRealCount)} non-finite real value(s) are reported as { "$plist_type": "real", "value": null } because JSON evidence cannot preserve NaN vs infinity.`,
-          ]),
+        : [unknownRealLimitation(unknownRealCount)]),
+      ...(negativeZeroRealCount === 0
+        ? []
+        : [negativeZeroRealLimitation(negativeZeroRealCount)]),
       ...(unknownDateCount === 0
         ? []
         : [unknownDateLimitation(unknownDateCount)]),
