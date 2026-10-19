@@ -316,6 +316,51 @@ Choose the guide for the target and intended interaction:
 Runtime requests name the target and actions. Launched targets run with your
 user permissions; consult the chosen guide for host requirements and effects.
 
+## Serve MCP over streamable HTTP
+
+`rea mcp` speaks stdio to the client that launched it. To serve the same MCP
+catalog over streamable HTTP for one local client, such as an agent environment
+runtime, start the dispatcher entry with `--http`:
+
+```sh
+rea mcp --http --port 8765
+```
+
+`--host` and `--port` default to `MCP_HOST` and `MCP_PORT` from the environment,
+then to `127.0.0.1` and an ephemeral port. The bound URL is written to stderr as
+one JSON log line (`"msg":"MCP transport listening"`) whatever `REA_LOG_LEVEL`
+is set to; nothing is written to stdout. `rea mcp --http --help` lists the accepted options. The listener serves
+one client at a time: a session ends with the client's `DELETE`, and a client
+that connects while another session is open takes it over, so a client that
+exited without ending its session needs no restart. The listener runs until
+SIGINT or SIGTERM and does not stop when stdin closes. See
+[transports](mcp-contracts.md#transports) for the session, `Host` header and
+shutdown contract. Client registrations written by setup and the MCP registry
+entry keep stdio.
+
+## Serve an environment manifest
+
+`rea environment-serve <manifest.json> --evidence <capture.json> [--host H]
+[--port N]` serves an environment manifest projected by `inspect-analysis-view`
+as an agent environment: an MCP server at `/mcp` with one tool per manifest
+tool, each replaying the retained capture records it cites, the environment
+card at `/.well-known/agent-env.json`, and a `/agentenv` data plane that
+answers every method with JSON-RPC `-32601`. The manifest's
+`parent_evidence_id` must equal the evidence file's `evidence_id`; otherwise
+the command refuses with `invalid_request` before binding.
+
+```sh
+rea environment-serve manifest.json --evidence capture.json --port 8765
+```
+
+`--host` and `--port` resolve like `rea mcp --http`: flags, then `MCP_HOST` and
+`MCP_PORT`, then `127.0.0.1` and an ephemeral port. `ENVIRONMENT_NAME` renames
+the served environment; set but blank, it is refused as `configuration_invalid`
+like a blank `MCP_HOST`. The bound URL is written to stderr as one JSON log line
+(`"msg":"MCP transport listening"`). See
+[agent environments](agent-environments.md) for what replay returns and does
+not establish.
+
 ## Output and exit status
 
 `rea mcp doctor --json` checks production MCP startup and reports child logs in
@@ -350,6 +395,19 @@ output formatting.
 | `1`       | The operation could not complete. Structured output identifies invalid input, permissions, cancellation, timeouts or another failure when available.                                                                                                                                                                                                                                   |
 | `128 + N` | Signal-derived status. An unhandled signal may have ended the process, with the shell or runtime preserving the conventional status; a command may instead have handled the signal, waited for its operation and cleanup to settle, and assigned the same status (`130` for SIGINT, `143` for SIGTERM). In the handled case, it may also have printed a structured `cancelled` result. |
 
+`rea mcp --http` is long-running and prints no structured result. It exits
+`130` on SIGINT or `143` on SIGTERM after closing the listener, the session and
+its providers, and `1` when that cleanup fails.
+
+`rea environment-serve` is also long-running: it serves until SIGINT or
+SIGTERM, closes the listener, then prints one structured
+`{"status":"stopped", …}` document naming the URL, environment and tool count
+and exits `130` or `143` through the shared cancellation handler below.
+Refusals before binding (unreadable files, non-Evidence JSON, capture Evidence
+in a format other than HAR, a manifest whose parent is not the supplied
+evidence, an unbindable port) print a structured
+error and exit `1`, as does a listener that fails after binding.
+
 A `cancelled` result does not by itself determine the exit status; it depends on
 the command's signal handling. Commands routed through the shared
 `withCommandCancellation` handler in the CLI set status `130` for SIGINT or
@@ -362,7 +420,8 @@ browser, web and Electron commands (including `analyze-web-bundle`,
 `capture-electron-scenario`), and the platform and provider command families
 for Android/ADB, Apktool/JEB/Flutter, firmware, PCAP and signal analysis,
 WASM/EVM, Go/Rust and binary diagnostics, Frida instrumentation, the Cutter
-command, objdump, Rizin and GDB. In these paths, a returned structured
+command, objdump, Rizin and GDB, and the agent environment server
+(`environment-serve`). In these paths, a returned structured
 `cancelled` result can be printed before the wrapper assigns the
 signal-derived status. This describes the current source routing; it is not a
 claim that every command or provider runtime has been independently exercised.
