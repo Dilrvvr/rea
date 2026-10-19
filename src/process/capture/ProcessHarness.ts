@@ -201,16 +201,16 @@ const cleanupFailedStartup = async (options: {
     temporaryRoot: options.temporaryRoot,
     ...(options.cleanupHost === undefined ? {} : { host: options.cleanupHost }),
   };
-  const cleanup =
+  const cleanupOutcome =
     options.resourceScope === undefined
       ? await releaseProcessResources(cleanupOptions)
       : await options.resourceScope.release(cleanupOptions);
-  const cleanupFailure = cleanupReportFailure(cleanup);
+  const cleanupFailure = cleanupReportFailure(cleanupOutcome.report);
   if (cleanupFailure !== undefined) {
     resolveProcessResult(
       undefined,
       options.cause,
-      cleanup,
+      cleanupOutcome,
       options.observations,
       {
         scenario: options.scenario,
@@ -285,6 +285,9 @@ const startCaptureRuntime = async (
       normalizeText,
       options.recordEvent,
     );
+    // Completed executable facts do not authorize launch after cancellation
+    // during the sampler's final metadata read or descriptor cleanup.
+    assertNotCancelled(options.signal);
     terminal = spawn(scenario.executable, [...scenario.arguments], {
       cwd: scenario.working_directory,
       env: makeProcessCaptureEnvironment(options),
@@ -398,13 +401,14 @@ const finishProcessRun = async (options: {
     temporaryRoot: options.temporaryRoot,
     ...(options.cleanupHost === undefined ? {} : { host: options.cleanupHost }),
   };
-  const cleanup =
+  const cleanupOutcome =
     options.resourceScope === undefined
       ? await releaseProcessResources(cleanupOptions)
       : await options.resourceScope.release(cleanupOptions);
+  const cleanup = cleanupOutcome.report;
   let { capture, executionFailure } = options;
   if (executionFailure === undefined && options.signal?.aborted)
-    executionFailure = processCaptureCancelled();
+    executionFailure = processCaptureCancelled(options.signal.reason);
   const observedExit =
     options.observations?.exit.state === "available"
       ? options.observations.exit.value.reason
@@ -448,11 +452,11 @@ const finishProcessRun = async (options: {
   // Cancellation remains authoritative until finalization has settled, even
   // when the workload exited normally before cleanup began.
   if (executionFailure === undefined && options.signal?.aborted)
-    executionFailure = processCaptureCancelled();
+    executionFailure = processCaptureCancelled(options.signal.reason);
   return resolveProcessResult(
     cleanupFailure === undefined ? verifiedCapture : capture,
     executionFailure,
-    cleanup,
+    cleanupOutcome,
     options.observations,
     partialContext,
   );
@@ -483,7 +487,8 @@ const completeCapture = async (options: {
     `${stage} failed: ${cause instanceof Error ? cause.message : "unknown failure"}`;
   const { runtime, scenario } = options;
   const { reason } = options.exit;
-  if (reason === "cancelled") throw processCaptureCancelled();
+  if (reason === "cancelled")
+    throw processCaptureCancelled(options.signal?.reason);
   let settlement: Awaited<ReturnType<typeof observeSettlement>>;
   try {
     settlement = await observeSettlement(
@@ -751,7 +756,8 @@ const runProcessScenario = async (
         state: "unavailable",
         reason: `The captured process exit was not observed because the finalization SIGKILL could not be delivered (initiating reason: ${exit.reason}).`,
       };
-      if (exit.reason === "cancelled") throw processCaptureCancelled();
+      if (exit.reason === "cancelled")
+        throw processCaptureCancelled(signal?.reason);
       throw new Error(
         "The captured process exit was not observed because the finalization SIGKILL could not be delivered.",
       );
