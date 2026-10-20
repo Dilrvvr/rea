@@ -90,12 +90,30 @@ metadata in the supported JSON payloads (`parameters`, `raw_result`,
 
 Tool execution failures return `isError: true` and the complete canonical
 `{ "error": ... }` diagnostic as JSON in text `content`. Read that diagnostic
-for the error code, target details, partial observations, and remediation.
+for the error code, target details, partial observations, remediation, and the
+optional bounded `recovery` next step. `recovery.kind=inspect_input_contract`
+names the rejected operation: re-read that operation's advertised input schema
+(call `tools/list` if the catalog may be stale), correct the listed fields, and
+do not repeat the unchanged call. `recovery.kind=inspect_timeout_state` names
+the operation and the REA server/provider deadline; inspect partial Evidence
+and reported cleanup state, then follow producer-specific remediation or reduce
+supported work. Generic errors do not assume adjustable timeout controls. Raising
+only the MCP client's deadline cannot extend this budget. These hints never
+include the complete catalog or caller arguments.
 Failures omit `structuredContent`, since each advertised `outputSchema`
 describes successful results. Successful replies retain their schema-validated
 structured data and matching text projection. Oversized errors are retained
 as Evidence before delivery of a bounded diagnostic with an export reference;
 if retention is unavailable or fails, the diagnostic reports that reason.
+
+SDK-generated input validation failures are normalized into the same canonical
+`invalid_request` text when the bounded diagnostic fits the response budget.
+The complete field/type diagnostic is preserved when normalization fits the
+response budget, including request-specific rejected fields and reasons. Oversized
+SDK diagnostics keep the existing retained-Evidence recovery path. An unknown
+tool remains an MCP JSON-RPC `-32602` error, but its message directs the caller
+to `tools/list` and an advertised operation instead of repeating the unknown
+name.
 
 `get_call_graph` returns a `graph` keyed by traversal depth and a top-level
 `limitations` array with deduplicated execution caveats. Each node keeps its
@@ -221,6 +239,23 @@ reserves 1024 bytes for the envelope. Raising it restores complete inline
 delivery for responses that fit that buffer and Node's single-string limit.
 It does not change the client's buffer, analysis coverage, or retained content.
 Ordinary responses keep their existing complete result contract.
+
+### Error recovery and deadline ownership
+
+Initialization instructions and the static JavaScript tool description teach
+recovery before a host can discard a tool response. Invalid input calls should be corrected from the connected schema
+(refresh `tools/list` only if stale), not retried unchanged. REA's returned
+`provider_timeout` describes its server/provider deadline; provider-authored
+remediation names the applicable controls and preserves partial Evidence and
+cleanup uncertainty.
+
+A host timeout without a REA result is different: execution and cleanup remain
+unknown. Increasing an advertised `analysis_timeout_ms` cannot fix a shorter
+client deadline. Configure the client's tool timeout with execution, cleanup
+and delivery headroom, or report that change is needed when not authorized.
+Session status does not establish that all target-free work stopped. Detailed
+host settings and bounded retry guidance live in the shipped skill's
+[recovery reference](https://github.com/morluto/rea/blob/main/.agents/skills/reverse-engineer-anything/references/connection-and-recovery.md#distinguish-client-and-server-deadlines).
 
 ### Untrusted target content
 

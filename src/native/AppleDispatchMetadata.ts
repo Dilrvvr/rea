@@ -24,9 +24,13 @@ import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
 import type { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 import { AnalysisError } from "../domain/analysisErrorBase.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
+import { fixedAllowanceOptions } from "../domain/fixedAllowanceRemediation.js";
 import { ProviderAdapterError } from "../domain/providerAdapterError.js";
 import { ProviderCleanupError } from "../domain/providerCleanupError.js";
-import { NATIVE_MACOS_PROVIDER_IDENTITY as IDENTITY } from "./NativeMacOSProviderMetadata.js";
+import {
+  APPLE_DISPATCH_METADATA_ANALYSIS_PROFILE,
+  NATIVE_MACOS_PROVIDER_IDENTITY as IDENTITY,
+} from "./NativeMacOSProviderMetadata.js";
 import { readBoundedFileBytes } from "../process/BoundedFileBytes.js";
 import { EvidenceIntegrityError } from "../domain/evidenceErrors.js";
 import { pushDispatchCoverage } from "./AppleDispatchCoverage.js";
@@ -214,6 +218,10 @@ export const inspectAppleDispatchMetadata = async (
       "memory",
       "Apple static metadata input exceeds its 64 MiB snapshot budget",
       { input_bytes: maximumBytes },
+      fixedAllowanceOptions(
+        "The Apple static metadata snapshot allowance",
+        "parser",
+      ),
     );
   const cancelled = () =>
     new AnalysisCancelledError("inspect_native_dispatch_metadata", {
@@ -249,12 +257,8 @@ export const inspectAppleDispatchMetadata = async (
   );
   return nativeDispatchMetadataResultSchema.parse({
     target_sha256: target.sha256,
-    provider: {
-      id: "native-macos",
-      name: "macOS native inspection utilities",
-      version: "apple-metadata-reader-1",
-    },
-    analysis_profile_digest: null,
+    provider: APPLE_DISPATCH_METADATA_ANALYSIS_PROFILE.provider,
+    analysis_profile_digest: APPLE_DISPATCH_METADATA_ANALYSIS_PROFILE.digest,
     result: decodeAppleDispatchMetadata(
       bytes,
       maxRecords,

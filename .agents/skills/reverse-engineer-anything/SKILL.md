@@ -2,7 +2,7 @@
 name: reverse-engineer-anything
 description: Reverse engineer native, managed, Electron/JavaScript, packaged, firmware, and browser targets with REA. Use shipped-artifact or requested runtime evidence to explain features, compare versions, decompile code, or guide a reconstruction. Skip REA for ordinary source-repository architecture analysis.
 metadata:
-  version: "43"
+  version: "44"
 ---
 
 # REA
@@ -30,6 +30,8 @@ unavailable, read [connection and recovery](references/connection-and-recovery.m
 Diagnose the observed blocker, continue useful supported work, and resume the
 original task after repair. Client approval, shell PATH, registration and engine
 availability have different remedies; avoid repeating setup for all of them.
+If the host times out without a REA result, do not repeat the unchanged call or
+assume work stopped. Read the recovery guide's deadline distinction before retrying.
 
 1. Diagnose without changing REA or client configuration. `npx` may download
    the package and write to npm's cache. For Codex, run
@@ -169,6 +171,15 @@ explicit path or endpoint and do not need it.
   absent metadata does not prove a binary is not Go, and unparsed text records
   remain explicit. See the
   [Go binary guide](https://github.com/morluto/rea/blob/main/docs/go-binaries.md).
+- Bundled GGUF or safetensors model declarations: `inspect_model_artifact`
+  with the explicit local file. Default header hashing leaves full-file identity
+  unknown; `hash: "full"` additionally reads all weights for SHA-256. MCP returns
+  retained summaries; optional `view` selects one page in the initial call. Use
+  `inspect_analysis_view` kind `model-artifact` for
+  batched metadata keys, tensor names or type totals, selected fields and pages.
+  Preserve header-scoped indices and array preview omissions; do not infer model
+  behavior from declared architecture or tensor types. See the
+  [model file guide](https://github.com/morluto/rea/blob/main/docs/model-artifacts.md).
 - Unity IL2CPP names, member owners and string literals from `global-metadata.dat`:
   `inspect_il2cpp_metadata` with the explicit local file; MCP defaults to compact
   counts. Query sections, images, types, methods, fields, properties, events,
@@ -178,8 +189,7 @@ explicit path or endpoint and do not need it.
   parameter pages. Missing collections in historical Evidence remain unknown.
   Versions 24, 27, 29, 31 and 39; no Unity, IL2CPP
   binary or disassembler is run. Unrecognized magic (possibly encrypted) and
-  other versions are unsupported. Names do not establish native code addresses
-  or runtime behavior. See the
+  other versions are unsupported. Optional matching `binary_path` enables static native addresses and type references; query `method_addresses` with indices or addresses/states, preserving every shared-body method and both artifact identities. Without a linked binary native counts remain unknown. Byte-pattern fallback is inferred; no runtime behavior or same-build pairing is proved. See the
   [IL2CPP metadata guide](https://github.com/morluto/rea/blob/main/docs/il2cpp-metadata.md).
 - Embedded cargo-auditable Rust dependency metadata: `inspect_rust_binary`
   with the explicit local ELF, PE, or thin Mach-O file. This built-in

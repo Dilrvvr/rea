@@ -103,6 +103,19 @@ Formats 2, 3 and 4 retain header, directory and integrity facts. Compact deliver
 keeps complete Evidence in the requested bundle. See [Godot PCK](godot-pck.md)
 for embedded packs, batch queries and unknown encrypted coverage.
 
+Inspect local model declarations without loading weights:
+
+```bash
+rea inspect-model-artifact /absolute/path/model.gguf --json
+rea inspect-model-artifact /absolute/path/model.safetensors --hash full --json
+```
+
+Default hashing reads only headers and leaves full-file identity unknown.
+`--hash full` streams the complete file for SHA-256. Both return typed metadata,
+original tensor declarations and derived totals. MCP summaries retain complete
+Evidence for filtered metadata, tensor and type-total pages; CLI compact delivery
+uses `--detail summary --evidence_output FILE`. See [model files](model-artifacts.md).
+
 Inspect Unity IL2CPP metadata names without Unity or a disassembler:
 
 ```bash
@@ -111,8 +124,10 @@ rea inspect-il2cpp-metadata /absolute/path/global-metadata.dat --json
 
 The command decodes a version 24, 27, 29, 31 or 39 `global-metadata.dat` and reports assembly
 images, type, method and member names, string literals, index ranges, header
-sections and SHA-256. It does not decrypt metadata or link names to native code
-addresses. MCP defaults to compact counts
+sections and SHA-256. With `--binary PATH` it also reads the matching
+`GameAssembly.dylib`, `GameAssembly.dll` or `libil2cpp.so` (never runs it) and
+links each method to its code address; `--ghidra-seeds PATH` then writes Ghidra
+function seeds. It does not decrypt metadata. MCP defaults to compact counts
 with retained Evidence; query indexed rows with filters, batch indices and
 selected fields. The CLI defaults to complete Evidence;
 `--detail summary --evidence_output FILE` exports the full result to a new file
