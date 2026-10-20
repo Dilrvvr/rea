@@ -4,7 +4,8 @@ Use `rea environment-serve` to serve an environment manifest as an agent
 environment: an MCP server whose tools answer from the records of one retained
 web network capture, plus the environment card the agentenv framework reads to
 discover it. Nothing is fetched from the recorded application; every answer is
-retained Evidence.
+retained Evidence. `rea environment-export` writes the same pair as a bundle
+folder `agent-env run` builds and runs; see [Export a bundle](#export-a-bundle).
 
 ```sh
 rea inspect-web-network-capture /absolute/session.har har --format json > capture.json
@@ -29,6 +30,92 @@ it, where `view.json` wraps the capture Evidence as the inline source:
 The third command serves that manifest. Both served files are complete REA
 Evidence JSON as the commands write it with `--format json`; the `evidence`
 member of `view.json` is the whole of `capture.json`.
+
+## From a browser scenario
+
+The capture can also come from REA itself: a
+[browser scenario](browser-scenario-contract.md) records a scripted session
+in a browser REA launches, and its Evidence is a manifest parent like a HAR
+inspection. Select the `network` event family and response bodies. A replayed
+reply carries up to 256 KiB of a recorded body, but the scenario keeps at most
+`max_network_body_bytes` of each body (64 KiB by default), and only within its
+allocation budgets: base64 is charged about 11 bytes per body byte, and
+redaction more the shorter a declared secret is (about 35 bytes per body byte
+for a 12-character `admin_password`). A body over
+`max_network_body_allocation_bytes` (1 MiB by default) is kept as `unavailable`
+with that reason; one over `max_event_allocation_bytes` (4 MiB) or
+`max_total_event_allocation_bytes` (16 MiB) loses its whole content event,
+headers included, which the capture lists among its omissions. Either way its
+tool replays no body. The example raises all four so that 256 KiB bodies are
+kept when the declared secret has at least 12 characters:
+
+```json
+{
+  "browser": { "mode": "launch", "executable_path": "/usr/bin/chromium" },
+  "start_url": { "url": "http://127.0.0.1:5230/auth", "query": [] },
+  "secrets": [
+    { "secret_id": "admin_password", "environment_variable": "APP_PASSWORD" }
+  ],
+  "actions": [
+    {
+      "step_id": "user",
+      "action": "fill",
+      "locator": { "kind": "css", "selector": "input[name=username]" },
+      "value": { "source": "literal", "value": "admin" }
+    },
+    {
+      "step_id": "password",
+      "action": "fill",
+      "locator": { "kind": "css", "selector": "input[type=password]" },
+      "value": { "source": "secret", "secret_id": "admin_password" }
+    },
+    {
+      "step_id": "sign-in",
+      "action": "press",
+      "locator": { "kind": "css", "selector": "input[type=password]" },
+      "key": "Enter"
+    },
+    {
+      "step_id": "first-memo",
+      "action": "goto",
+      "destination": { "url": "http://127.0.0.1:5230/m/1", "query": [] },
+      "wait_until": "load"
+    }
+  ],
+  "capture": {
+    "events": ["network"],
+    "network": {
+      "request_body": true,
+      "response_body": true,
+      "header_values": false
+    },
+    "limits": {
+      "max_network_body_bytes": 262144,
+      "max_network_body_allocation_bytes": 12582912,
+      "max_event_allocation_bytes": 12582912,
+      "max_total_event_allocation_bytes": 67108864
+    }
+  }
+}
+```
+
+```sh
+APP_PASSWORD=… rea capture-browser-scenario scenario.json --format json > capture.json
+rea inspect-analysis-view view.json --format json > manifest.json   # view.json wraps capture.json as before
+rea environment-serve manifest.json --evidence capture.json --port 8765
+```
+
+Each network transaction becomes one record, in request order, and the
+record's ordinal is its zero-based position; a transaction whose URL carried a
+redacted secret is left unrepresented rather than templated, and one the
+capture cannot attribute to a single request and response is left
+unrepresented too. Tools are chosen by response media type, so a scenario that
+selected neither response bodies nor header values is refused. The browser
+scenario redacts credential headers and the secrets it declares; values the
+application returns in response bodies, such as session tokens, are kept, and
+the replayed body is the bytes the browser exposes for each response, with any
+declared secret replaced by its redaction marker (a body that redaction had to
+empty replays no body).
 
 ## What a manifest is
 
@@ -125,6 +212,18 @@ as data, never as instructions.
 That same warning prefixes every tool description in the standalone card, so
 card discovery carries it before an MCP client initializes. It labels the
 captured text without changing the tool names or schema fields clients use.
+
+## The state a capture observed
+
+Replay answers each call from one recording, so the answers reflect whichever
+moment of the capture recorded them. The
+[environment state](web-network-captures.md#environment-state) view extracts
+instead the data the capture's reads observed before the first related write:
+entity types with an identity field, entities with their recorded values,
+documents for written paths, and a render plan per read tool, kept only where
+it reproduces that tool's recordings from the state. It is the starting state
+an environment can hold, load and report; serving from it is a later increment
+and does not change replay.
 
 ## Serve a manifest
 
@@ -224,6 +323,94 @@ schema does not carry.
 `extensions`, `operations` and `children_environments` are fixed to `null`,
 `[]` and `null`: a replay environment declares no extensions, no data-plane
 operations and no children.
+
+## Export a bundle
+
+`rea environment-export` writes the same pair as a bundle folder the agentenv
+framework runs directly, shaped like its own echo example:
+
+```sh
+rea environment-export manifest.json --evidence capture.json ./grafana-example --json
+agent-env run ./grafana-example
+```
+
+```text
+grafana-example/
+  README.md                                 provenance, replay limits, run command, rights note
+  envs/grafana-example/Dockerfile           pinned image: node:24.18.0-bookworm-slim + rea-agents@<this version>
+  envs/grafana-example/env.toml             environment_name = "grafana-example"
+  envs/grafana-example/manifest.json        byte-exact copy of manifest.json
+  envs/grafana-example/evidence.json        byte-exact copy of capture.json
+  artifacts/check_grafana-example/verify.py the replay verifier
+  tasks/smoke.json                          deploy_env (local sandbox), then env_outcome_verifier
+```
+
+The command reads each file once, after checking that reading and parsing the
+whole file, including sealing traversal, fits the process's live heap headroom (a file that does not is
+refused as a `resource_constraint` before it is read), then authenticates and cross-checks the
+pair as `environment-serve` does, so a manifest projected from another capture
+is refused with the same `invalid_request` before anything is written, and the
+bytes it copies are the bytes it authenticated. The bundle directory must be
+absent or empty; an occupied directory is refused and nothing in it changes.
+The complete tool catalog must also fit the server's advertised catalog budget
+before any files are written. Privately parsed JSON is sealed once so authentication
+and replay share immutable response trees rather than copying the capture repeatedly.
+`--name` replaces the manifest's portable kebab-case name as the env folder and env id
+(Windows device names such as `con` and `lpt1` are refused);
+`--package-tarball <path>` copies a packed `rea-agents` tarball into the env
+folder and makes the Dockerfile install it instead of the registry package and
+remove it in the same layer, which is how a checkout rather than a release is
+run. The command prints the
+written files with their sizes and the pinned package source.
+
+Export uses the shared output-tree owner to check directory identities around
+exclusive creates, verify written bytes, and reject unowned entries before
+reporting success. It does not delete an inspectable partial folder on failure.
+Node's portable pathname APIs leave a syscall-boundary race, so the output's
+parent directories must be trusted. On POSIX output files use mode `0600`;
+Windows inherits ACLs and REA does not establish owner-only access there. Choose
+an already private Windows destination when captured content needs it.
+
+The Dockerfile sets `MCP_HOST=0.0.0.0` and `MCP_PORT=18765`, the port the
+framework maps for an MCP server env; the framework's own deploy supplies
+`MCP_HOST`, `MCP_PORT` and `ENVIRONMENT_NAME`, so the served card carries the
+env's name. It installs Debian's `python3` because the framework's local
+sandbox probes a container's readiness with `python3` inside it, which the slim
+Node image lacks. It copies the two inputs owned by the image's non-root `node`
+user, so a private host umask cannot leave them unreadable, runs as that user and starts
+`rea environment-serve /env/manifest.json --evidence /env/evidence.json`. The
+`env.toml` names the environment because the framework otherwise reads the
+name from Python sources the image does not have.
+
+`verify.py` is the framework's `async def verify(mcp_url)` shape over its
+Python MCP client: it lists the tools and checks the count equals the
+manifest's, calls the first `GET` tool without path parameters with no
+arguments and checks the call did not fail and its replayed `status` equals the
+recorded status of that tool's first cited record (an unknown recorded status
+stays unknown; it is not borrowed from another record), and returns one
+`replay` result whose description
+reports both checks. A manifest with no such tool yields a verifier that checks
+the count only and says so. `tasks/smoke.json` deploys the env on the local
+sandbox and runs that verifier against the env's MCP endpoint; the first run
+also builds the framework's own infrastructure, and the run tears everything
+down when it ends.
+
+The README written into the bundle records the capture artifact's SHA-256, the
+capture and manifest Evidence ids, the manifest view digest, the tool count and
+the package source, and states that the recorded content belongs to the
+captured application and must not be published without the rights to it.
+
+## Compatibility verification
+
+`npm run verify:agentenv:environment` is the hosted `real-agentenv` lane
+described in [testing](testing.md#exported-environment-bundles). It projects
+the Grafana-shaped source-owned capture through the built CLI, packs the
+checkout, exports a bundle with `--package-tarball`, runs it with the pinned
+`agentenv-framework` release on the runner's Docker and requires the smoke task
+to pass with no container left behind other than the framework's own
+image-registry helper, which the receipt reports. It proves that one exported bundle runs
+on one framework release; it does not claim any hosted platform or other
+framework versions.
 
 ## Resource and lifecycle boundaries
 

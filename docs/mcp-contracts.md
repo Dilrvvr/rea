@@ -218,12 +218,19 @@ no group was templated.
 See [derived API surfaces](web-network-captures.md#derived-api-surface).
 
 `inspect_analysis_view` also accepts `environment-manifest` for retained HAR capture
-Evidence, projecting the primary origin's request lines into named tools with path
+Evidence and `capture_browser_scenario` Evidence, projecting the primary origin's request lines into named tools with path
 templates, parameters, observed query names, value-free body shapes and record
 pointers, plus excluded groups and three fixed unknowns. Templates, parameters and
 names are inferences; the Evidence is inferred whenever any tool or excluded group
 is templated, and derived otherwise.
 See [environment manifests](web-network-captures.md#environment-manifest).
+
+`inspect_analysis_view` also accepts `environment-state` for the same parents,
+extracting the initial state the recorded reads observed: entity types with an
+identity field, entities, documents for written non-entity paths, and a render
+plan per read tool that reproduces its recordings from the state or names why it
+cannot. Types and identity are inferences, so the Evidence is always inferred.
+See [environment state](web-network-captures.md#environment-state).
 
 `inspect_analysis_view` projects a caller-selected view of already completed
 `inspect_binary_layout`, `analyze_javascript_application`, or `analyze_function`

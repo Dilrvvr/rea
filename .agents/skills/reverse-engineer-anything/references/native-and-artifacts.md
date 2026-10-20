@@ -27,6 +27,21 @@ unparsed module-text line. A missing record is an unknown, not proof of a
 non-Go binary; observed metadata does not authenticate its claims. Function,
 source and type recovery remain a separate native-analysis question.
 
+## IL2CPP metadata
+
+Use `inspect_il2cpp_metadata` for an explicit local Unity `global-metadata.dat`
+(versions 29, 31 and 39) when the question concerns assembly images, type or method names,
+namespaces or index ranges. No `open_binary`, Unity installation or target
+execution is required. The CLI equivalent is `inspect-il2cpp-metadata PATH`.
+MCP defaults to counts with complete retained Evidence. Query `sections`,
+`images`, `types` or `methods` through `inspect_analysis_view`; use exact names,
+batch indices and selected fields. Row indices are scoped by artifact SHA-256
+and collection; page offsets count filtered matches. Preserve
+artifact SHA-256 and index widths. Unrecognized magic may mean encryption and
+is unsupported, not decrypted. Linking names to `GameAssembly` or
+`UnityFramework` code addresses remains a separate native-analysis question.
+See [IL2CPP metadata](https://github.com/morluto/rea/blob/main/docs/il2cpp-metadata.md).
+
 ## Rust dependency metadata
 
 Use `inspect_rust_binary` for an explicit local ELF, PE, or thin Mach-O when
@@ -311,3 +326,22 @@ with two complete inspection Evidence records (or current-session retained
 references) and explicit scope. Preserve unknown types/duplicate names; static
 interface equality is not runtime compatibility. CLI accepts complete inline
 Evidence in `rea compare-wasm-interfaces input.json --json`.
+
+## Godot PCK
+
+For a standalone PCK, `open_binary` then `inspect_artifact` with
+`detail: "summary"` retains the complete static inventory. Use the returned
+`parent_evidence_id` with `inspect_analysis_view` inventory occurrences filtered
+by exact `logical_paths` or `occurrence_ids`, and join `artifact_id` to nodes
+filtered by `artifact_ids`. Select only needed fields; identity links remain.
+Prefer `inspect-artifact --detail summary --evidence_output PATH` for CLI tasks;
+the same CLI discovers embedded packs via their EOF trailer without opening a
+native analysis provider. Normal native opening remains unchanged.
+
+Distinguish declared MD5 from observed SHA-256 and graph/page completeness from
+`source_coverage`. Encrypted directories and sparse bundles have unknown entry
+coverage; encrypted members have unknown content identity. An empty filtered
+page cannot prove absence in unknown coverage. Retained views are historical,
+not fresh filesystem checks. No decryption, Godot resource decoding, GDScript
+decompilation or target execution is provided. See
+[Godot PCK](https://github.com/morluto/rea/blob/main/docs/godot-pck.md).

@@ -30,6 +30,13 @@ jq -c '{source: {kind: "inline", evidence: .}, view: {kind: "summary"}}' app-evi
 rea inspect-analysis-view app-view.json
 ```
 
+The request can also name the saved file instead of embedding it:
+`{"source": {"kind": "evidence-file", "path": "app-evidence.json"}, "view": {"kind": "summary"}}`.
+The CLI resolves a relative path against the working directory; MCP clients
+pass an absolute path. REA reads and authenticates the file, then projects it
+like retained Evidence, so a large file is bounded by the file reader rather
+than charged as inline input.
+
 For example, a 334 MB Obsidian application Evidence file yields a summary view
 of about 10 KB. Replace the view with
 `{"kind": "page", "collection": "modules", "offset": 0, "limit": 32}` for a
@@ -58,8 +65,10 @@ assembly-wide inventory, so the output can still be large.
 
 Choose the workflow from the artifact's contents rather than its `.exe` or
 `.dll` extension. The managed parser requires PE/CLI metadata; it does not
-unpack .NET single-file hosts or decode IL2CPP metadata. NativeAOT method bodies
-require native analysis. See the [managed-code guide](managed-code-analysis.md)
+unpack .NET single-file hosts or decode IL2CPP. For the image, type and method
+names in a Unity `global-metadata.dat`, use
+[IL2CPP metadata](il2cpp-metadata.md). NativeAOT method bodies require native
+analysis. See the [managed-code guide](managed-code-analysis.md)
 for supported deployment forms, selection semantics, and coverage limits.
 
 ## SQLite snapshots
@@ -82,6 +91,31 @@ rea inspect-go-binary /absolute/path/to/program --json
 The shared CLI/MCP workflow reports compiler version, modules, replacements,
 build settings, original bytes and SHA-256. See [Go binaries](go-binaries.md)
 for supported containers and absent or malformed metadata.
+
+Inspect a Godot PCK without running the game:
+
+```sh
+rea inspect-artifact game.pck --detail summary --evidence_output evidence.json --json
+rea extract-artifact game.pck --json
+```
+
+Formats 2, 3 and 4 retain header, directory and integrity facts. Compact delivery
+keeps complete Evidence in the requested bundle. See [Godot PCK](godot-pck.md)
+for embedded packs, batch queries and unknown encrypted coverage.
+
+Inspect Unity IL2CPP metadata names without Unity or a disassembler:
+
+```bash
+rea inspect-il2cpp-metadata /absolute/path/global-metadata.dat --json
+```
+
+The command decodes a version 29, 31 or 39 `global-metadata.dat` and reports assembly
+images, type and method names, index ranges, header sections and SHA-256. It
+does not decrypt metadata or link names to native code addresses. MCP defaults
+to compact counts with retained Evidence; query indexed rows with filters,
+batch indices and selected fields. The CLI defaults to complete Evidence;
+`--detail summary --evidence_output FILE` exports the full result to a new file
+and returns a compact overview. See [IL2CPP metadata](il2cpp-metadata.md).
 
 Inspect an embedded cargo-auditable Rust dependency list without installing
 Rust or configuring a disassembler:
@@ -361,6 +395,35 @@ like a blank `MCP_HOST`. The bound URL is written to stderr as one JSON log line
 [agent environments](agent-environments.md) for what replay returns and does
 not establish.
 
+## Export an environment bundle
+
+`rea environment-export <manifest.json> --evidence <capture.json> <dir>
+[--package-tarball <path>] [--name <override>]` writes the same manifest and
+capture pair as a bundle folder the agentenv framework runs with
+`agent-env run <dir>`. It reads each file once, authenticates and cross-checks
+the pair with the same checks as `environment-serve`, copies the bytes it
+authenticated, refuses to write into a directory that exists and is not empty,
+and never overwrites a file.
+
+```sh
+rea environment-export manifest.json --evidence capture.json ./grafana-example --json
+```
+
+The folder holds a `README.md` with the bundle's provenance, an env folder
+`envs/<name>/` with a `Dockerfile` that installs this exact `rea-agents`
+version and serves the copied `manifest.json` and `evidence.json` (written
+with mode `0600` on POSIX; Windows retains inherited ACLs) with
+`environment-serve`, a Python verifier under `artifacts/check_<name>/` and the
+smoke task `tasks/smoke.json`. `--package-tarball` copies a packed `rea-agents`
+tarball into the env folder and installs it instead of the registry package,
+which is how the hosted lane proves a checkout rather than a release. `--name`
+replaces the manifest's kebab-case name as the env folder and env id; a device
+name Windows reserves (`con`, `nul`, `com1` and the like) is refused. The
+command prints one JSON document listing the written files with their sizes
+and the pinned package source. See
+[agent environments](agent-environments.md#export-a-bundle) for the folder
+layout and what the smoke task checks.
+
 ## Output and exit status
 
 `rea mcp doctor --json` checks production MCP startup and reports child logs in
@@ -407,6 +470,15 @@ Refusals before binding (unreadable files, non-Evidence JSON, capture Evidence
 in a format other than HAR, a manifest whose parent is not the supplied
 evidence, an unbindable port) print a structured
 error and exit `1`, as does a listener that fails after binding.
+`rea environment-export` is one-shot: it prints the written files and exits
+`0`, or prints a structured `invalid_request` error and exits `1` for the same
+pair refusals, a non-empty or file-occupied directory, a missing package
+tarball or a name that is not a kebab-case label or is a Windows device name,
+writing nothing in each case.
+A write that fails after the first file (a permission or disk-space failure
+on a later path) propagates as the host's failure and leaves the partial
+folder in place for inspection; remove it before retrying, since the next
+attempt refuses the non-empty directory.
 
 A `cancelled` result does not by itself determine the exit status; it depends on
 the command's signal handling. Commands routed through the shared
