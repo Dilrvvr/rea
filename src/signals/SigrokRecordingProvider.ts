@@ -8,6 +8,10 @@ import {
   parseDecoderDiscovery,
 } from "./parseDecoderDiscovery.js";
 import {
+  parseSigrokSelectorRejection,
+  type SigrokSelection,
+} from "./sigrokSelectorRejection.js";
+import {
   BOUNDED_PRODUCER_LIMITS as LIMITS,
   prlimitArgumentVector,
   readLinuxResourceLimits,
@@ -166,7 +170,11 @@ export class SigrokRecordingProvider implements SignalRecordingPort {
       root = await this.createRuntime();
       this.#resources.retain(root, undefined);
       const snapshotPath = join(root.path, "recording");
-      const execute = async (args: readonly string[]) => {
+      const execute = async (
+        args: readonly string[],
+        // Caller selectors this command loads; their refusals are input errors.
+        selection?: SigrokSelection,
+      ) => {
         capturedOutput = undefined;
         const output = await runOwnedCommand(
           {
@@ -222,6 +230,16 @@ export class SigrokRecordingProvider implements SignalRecordingPort {
           );
         phase = previousPhase;
         resourcePath = "path" in input ? input.path : command;
+        const rejection =
+          output.exitCode === 0 || selection === undefined
+            ? undefined
+            : parseSigrokSelectorRejection(output.stderr.text, selection);
+        if (rejection !== undefined)
+          throw new AnalysisInputError(
+            operation,
+            { capturedOutput, userMessage: rejection.message },
+            [rejection],
+          );
         if (output.exitCode !== 0)
           throw new ProviderAdapterError(
             SIGROK_PROVIDER_IDENTITY.id,
@@ -270,7 +288,7 @@ export class SigrokRecordingProvider implements SignalRecordingPort {
           input.decoder === null
             ? ["--dont-scan", "--list-supported"]
             : ["--dont-scan", `--protocol-decoders=${input.decoder}`, "--show"];
-        const output = await execute(args);
+        const output = await execute(args, input);
         const report = signalDecodersSchema.parse({
           selection: input,
           ...parseDecoderDiscovery(output.stdout.text, input),
@@ -311,7 +329,7 @@ export class SigrokRecordingProvider implements SignalRecordingPort {
             ? []
             : [`--protocol-decoder-annotations=${input.annotations}`]),
         ];
-        const output = await execute(args);
+        const output = await execute(args, input);
         phase = "integrity";
         resourcePath = snapshotPath;
         if (

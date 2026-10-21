@@ -70,6 +70,7 @@ const subjectFormatSchema = z.enum([
   "mach-o-universal",
   "javascript-bundle",
   "entitlements",
+  "pyinstaller",
 ]);
 const subjectBaseSchema = z.strictObject({
   name: z.string().min(1),
@@ -111,7 +112,8 @@ export const evidenceLocationSchema = z.discriminatedUnion("kind", [
   }),
 ]);
 
-const evidenceAuthoritySchema = z.enum([
+/** Source authority vocabulary owned by Evidence and reused by its consumers. */
+export const evidenceAuthoritySchema = z.enum([
   "shipped-artifact",
   "controlled-replay",
   "historical-reference",
