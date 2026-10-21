@@ -172,7 +172,9 @@ and during shutdown.
   transfer even with `overwrite`; only a clean `test -e` exit of 1 with no
   output is interpreted as absence. The check is not atomic, so a different
   process can create the path before `adb push` writes it. When available, the device's
-  `sha256sum` verifies the transfer; installs preserve the
+  `sha256sum` verifies the transfer. A missing command or output without a
+  recognizable digest reports `device_digest_source: "unavailable"` with an
+  unverified-transfer limitation; installs preserve the
   device's `Failure [...]` reason verbatim.
 - **Producer identity stays attached.** Every result embeds the producing
   adb client (`binary_path`, `path_source`, `version`, `installed_path`).
@@ -184,9 +186,11 @@ and during shutdown.
   The app/activity lifecycle tools use `am start -W` and `am force-stop`.
 - Per-invocation budgets: client/devices 10-20 s, shell reads 20-60 s with
   64 KiB-8 MiB capture caps (logcat 4 MiB, screen 32 MiB), transfers and
-  bugreports 600 s. Output capture overflow reports `resource_constraint`;
-  deadline expiration, including the client-version probe, reports
-  `provider_timeout`. Command cancellation preserves the caller's exact reason;
+  bugreports 600 s. Output capture overflow reports `resource_constraint`
+  and names the byte allowance. Deadline expiration, including the
+  client-version probe, reports `provider_timeout` and names the effective
+  milliseconds. This release has no runtime override for those deadlines or
+  capture caps. Command cancellation preserves the caller's exact reason;
   a later abort does not replace an already completed command failure.
 - Pull and capture outputs are additive: the destination must not already
   exist. Re-running a completed pull refuses the existing directory instead

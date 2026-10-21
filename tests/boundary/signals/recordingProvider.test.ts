@@ -16,6 +16,7 @@ import { PrivateRuntimeRoot } from "../../../src/process/PrivateRuntimeRoot.js";
 import { spawnOwnedProviderProcess } from "../../../src/process/ProviderProcess.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 import { createDeferred } from "../../fixtures/binarySession.js";
+import { analysisErrorRemediationAction } from "../../../src/domain/analysisErrorPresentation.js";
 import { createApplicationMcpHarness } from "../../fixtures/applicationMcpHarness.js";
 import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { Cli } from "incur";
@@ -608,6 +609,9 @@ it("preserves termination signal and effective file ceiling as a resource failur
     reportedLimits: { file_bytes: 1048576 },
     capturedOutput: { signal: "SIGXFSZ", stderr: "before file limit\n" },
   });
+  expect(analysisErrorRemediationAction(result.error)).toContain(
+    "REA retains the tighter inherited limit",
+  );
 });
 
 it("discovers decoders without reading a recording and retains installation provenance", async () => {
@@ -736,10 +740,10 @@ it.each([
       resource: "memory",
       retryable: false,
     });
-    expect(result.error.remediationAction).toContain(
+    expect(analysisErrorRemediationAction(result.error)).toContain(
       "The retained command-output allowance",
     );
-    expect(result.error.remediationAction).not.toMatch(
+    expect(analysisErrorRemediationAction(result.error)).not.toMatch(
       /Review the reported worker memory limits/u,
     );
   }

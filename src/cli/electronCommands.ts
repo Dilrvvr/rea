@@ -187,7 +187,9 @@ const registerJavaScriptRuntimeReconciliationCommand = (
           const { reconcileJavaScriptRuntimeEvidence } =
             await import("../application/javascript/JavaScriptRuntimeReconciliationService.js");
           const result = reconcileJavaScriptRuntimeEvidence(input.value);
-          return result.ok ? result.value : cliError(result.error);
+          return result.ok
+            ? result.value
+            : cliError(result.error, "Application workflow failed");
         },
       ),
   });
@@ -295,7 +297,9 @@ const registerJavaScriptApplicationCommand = (
         logCliCommand(logger, CLI_COMMANDS.analyzeJavaScriptApplication, () =>
           runCliJavaScriptApplicationAnalysis(
             {
-              input_path: absoluteCallerPath(args.path),
+              // An empty path names no file; leave it for input validation.
+              input_path:
+                args.path === "" ? args.path : absoluteCallerPath(args.path),
               format: options.artifactFormat,
               integrity_policy: options.integrityPolicy,
               ...(options.maxSemanticNodes === undefined
@@ -354,7 +358,8 @@ const inputError = (
 
 const cliError = (
   error: Parameters<typeof projectAnalysisError>[0],
+  label = "Electron analysis failed",
 ): JsonValue => ({
-  error: "Electron analysis failed",
+  error: label,
   ...projectAnalysisError(error),
 });
