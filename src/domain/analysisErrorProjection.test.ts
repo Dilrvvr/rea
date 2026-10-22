@@ -100,7 +100,7 @@ describe("agent recovery metadata", () => {
       "raise its tool deadline",
     );
     expect(projected.remediation.action).not.toMatch(
-      /declared timeout controls|larger server\/provider budget/u,
+      /declared timeout controls|larger server\/provider budget|without assuming adjustable limits|do not assume adjustable/u,
     );
     expect(analysisErrorProjectionSchema.parse(projected)).toEqual(projected);
   });
@@ -280,6 +280,32 @@ it("distinguishes unsupported target formats from unavailable provider capabilit
   expect(projected.remediation.action).toContain("target format");
   expect(projected.remediation.action).not.toContain("doctor");
   expect(analysisErrorProjectionSchema.safeParse(projected).success).toBe(true);
+});
+
+it("keeps a refusing provider's recovery on a target selection failure", () => {
+  const selection = {
+    reason: "target_unsupported" as const,
+    requestedProviderId: "ghidra",
+    candidateIds: ["ghidra"],
+    userMessage: "Unsupported target: the configured extension is x86-64 only.",
+  };
+  expect(
+    projectAnalysisError(
+      new ProviderSelectionError({
+        ...selection,
+        remediationAction: "Omit the extension setting for this target.",
+      }),
+    ),
+  ).toMatchObject({
+    code: "capability_unavailable",
+    message: selection.userMessage,
+    remediation: { action: "Omit the extension setting for this target." },
+    details: { selection_reason: "target_unsupported" },
+  });
+  expect(
+    projectAnalysisError(new ProviderSelectionError(selection)).remediation
+      .action,
+  ).toBe(selection.userMessage);
 });
 
 it.each([false, true])(
