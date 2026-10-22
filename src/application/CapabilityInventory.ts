@@ -350,6 +350,7 @@ export const compactToolAvailability = (
 const availabilityFor = (context: AvailabilityContext): Availability => {
   // These built-in workflows accept a caller-selected endpoint; they do not load the optional passive provider.
   if (
+    context.name === "inspect_byte_entropy" ||
     context.name === "observe_web_execution" ||
     context.name === "inspect_web_event_listeners"
   )
@@ -417,6 +418,8 @@ const workflowAvailabilityFor = ({
     name === "inspect_model_artifact" ||
     name === "inspect_gpu_code_objects" ||
     name === "inspect_rust_binary" ||
+    name === "inspect_python_pyc" ||
+    name === "inspect_erlang_beam" ||
     name === "inspect_electron_fuses"
   )
     return { reason: "available", remediation: null };
@@ -497,7 +500,11 @@ const workflowAvailabilityFor = ({
           remediation:
             "Supply WABT 1.0.42 via absolute REA_WABT_BIN_DIRECTORY. No active binary target is required; tools are checked at execution.",
         };
-  if (name === "inspect_pe_resources")
+  if (name === "inspect_pe_resources" || name === "inspect_native_exports")
+    return { reason: "available", remediation: null };
+  if (name === "inspect_pe_certificates")
+    return { reason: "available", remediation: null };
+  if (name === "inspect_elf_notes")
     return { reason: "available", remediation: null };
   if (name === "inspect_evm_interface") {
     if (policy.evmInterfaceEnabled !== true)

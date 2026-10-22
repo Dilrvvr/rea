@@ -1,6 +1,9 @@
 import type { ToolResultDelivery } from "./toolResult.js";
 import type { EvidenceMcpServer } from "./EvidenceMcpServer.js";
-import { summarizeRetainedAnalysis } from "../application/analysisView/AnalysisViewService.js";
+import {
+  projectRetainedAnalysis,
+  requireAnalysisViewRetention,
+} from "../application/analysisView/AnalysisViewService.js";
 import type { EvidenceLookup } from "../application/EvidenceInputResolver.js";
 import type { EvidenceWriter } from "../application/investigation/InvestigationRecordPort.js";
 import {
@@ -41,6 +44,8 @@ import { deliverEvidenceResult } from "./contractToolHandler.js";
 
 interface ElectronToolRegistration {
   readonly artifactResources: ArtifactResourceScope;
+  /** The server's selected environment; JavaScript analysis reads its admission settings. */
+  readonly environment: Readonly<Record<string, string | undefined>>;
   readonly logger: Logger;
   readonly observationLoadFailure?: OptionalProviderLoadFailure | undefined;
   readonly activeLoadFailure?: OptionalProviderLoadFailure | undefined;
@@ -111,14 +116,25 @@ export const registerElectronTools = (
         analyzeContract,
         undefined,
         { input, context },
-        async ({ detail, ...request }, { signal, progress }) => {
+        async ({ detail, view, ...request }, { signal, progress }) => {
+          if (detail === "summary") {
+            const ready = requireAnalysisViewRetention(
+              analyzeContract.name,
+              options,
+            );
+            if (!ready.ok) return ready;
+          }
           const analyzed = await analyzeJavaScriptApplicationValidated(
             request,
             options.artifactResources,
-            { signal, progress },
+            { signal, progress, environment: options.environment },
           );
           return detail === "summary" && analyzed.ok
-            ? summarizeRetainedAnalysis(analyzed.value, options)
+            ? projectRetainedAnalysis(
+                analyzed.value,
+                options,
+                view ?? { kind: "summary" },
+              )
             : analyzed;
         },
       ),

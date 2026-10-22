@@ -258,6 +258,13 @@ cases. Share setup without hiding inputs or expected evidence. For successful
 `.ok` assertion adds no coverage. Protocol fixtures must reject unmodeled
 commands and preserve actual producer reply shapes.
 
+Packed bridge validation uses Python's standard-library AST and tar readers
+with `-I -S`: caller-local modules, `PYTHONPATH`, and site startup hooks must
+not replace those readers or execute during validation. Controlled `ast.py`
+and `sitecustomize.py` fixtures must leave their markers absent and still
+reject malformed packed Python with `SyntaxError`. This checks static package
+verification, not real Hopper or Ghidra behavior.
+
 Stateless source-analysis matrices may share a file-owned stdio MCP connection
 and retain representative compiled CLI parity checks. Every distinct source
 scenario still runs through the public workflow; session-lifecycle scenarios
@@ -707,13 +714,18 @@ miss. Native
 artifacts, dependency installs, package archives, and runtime verification remain
 host-local. Keep platform-dependent outputs out of this shared cache.
 
-The Windows native verifier's private-runtime ACL observer reads SID rules once
-for both trustee validation and counting. It deliberately rejects the convenience
-`Access` property, which resolves account names. Its `private-runtime-acl` stderr
-markers report completed phases and elapsed time; inspect these on a timeout
-before attributing it to startup, ACL reads, or identity lookup. The original
-15-second deadline and all ownership, DACL, and readonly assertions remain in
-force. A passing retry alone does not explain a previous timeout.
+The Windows native verifier's private-runtime ACL observer reads the owner and
+access rules only in SID form, checks that every identity it compares is a
+`SecurityIdentifier`, and never uses `Get-Acl` or the convenience `Access`
+property, which resolves account names. Its Windows PowerShell observers call
+.NET members directly and build their JSON without cmdlets, pipelines, module
+autoloading, or type-table updates. The `private-runtime-acl` stderr markers
+report the powershell.exe process uptime and each completed phase; inspect them
+on a timeout before attributing it to startup, ACL reads, or identity lookup.
+The 60-second observer deadline bounds a hung observer while covering a cold
+powershell.exe start on a starved hosted runner. All ownership, DACL, and
+readonly assertions remain in force. A passing retry alone does not explain a
+previous timeout.
 
 Record cold and warm preparation separately from fresh test execution when
 benchmarking the optional `npm run check:pr` gate. Compare multiple runs on the
@@ -1243,7 +1255,9 @@ host behavior or native process-supervision controls.
 real `.nib` with Xcode `ibtool`, wraps it in a temporary app bundle, and runs
 the compiled CLI and stdio MCP server with production providers. It compares
 their decoded results and checks the view hierarchy, outlet, action, evidence coverage, and truncation
-status. Storyboard compilation additionally requires an installed iOS platform.
+status. It also recompiles the XIB with toggled control booleans and requires
+both decodes to match `ibtool --export` for each source. Storyboard compilation
+additionally requires an installed iOS platform.
 
 Keep the provider-specific acceptance path independent from optional
 cross-compilers. Cross-format failures belong to the cross-format lane and must
@@ -1818,7 +1832,7 @@ the built CLI, packs the checkout with `npm pack`, exports the bundle with
 registry package, and runs `agent-env run` on the bundle. It checks that the
 export reports the planned file set with the inputs copied byte-exact and a
 bundle served from the derived state, which serves fewer tools than the
-manifest because write tools are not served, that the runner exits `0` with
+manifest because write tools the capture did not confirm are not served, that the runner exits `0` with
 `tasks/smoke.json` reported as passed and the verifier's description naming
 that served tool count, and that no container exists
 after the run that did not exist before; the container inventory runs even when
