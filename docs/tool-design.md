@@ -30,8 +30,13 @@ inside one tool.
 
 A primitive reports a reusable fact about an identified object or relationship.
 A format-specific decoder qualifies; one application's business interpretation
-belongs outside the general contract. Expose provider APIs when they add a
-useful capability that existing tools cannot express.
+belongs outside the general contract. The format owner reports source
+observations and structural validation; the application or workflow owner
+applies use-case-specific admission policy without reinterpreting raw fields.
+For example, DOS MZ structure and Windows-header evidence stay separate, while
+target resolution decides whether the unresolved header permits admission.
+Expose provider APIs when they add a useful capability that existing tools
+cannot express.
 
 Compose a workflow when repeated use demonstrates a multi-source outcome REA
 can join without hiding caller choices or uncertainty. Batch homogeneous reads
@@ -57,6 +62,9 @@ satisfy. A plan without execution does not establish runtime behavior.
 - Keep observed, derived, and inferred relationships distinct. Preserve
   unresolved edges and partial provider facts instead of requiring every
   provider to supply the same metadata.
+  When a format constructor changes defaults or flags, retain the source
+  values and use separately derived effective values only for operations
+  whose semantics require them.
 - For caller/callee reads, `relationship_coverage` describes only the
   provider-observed direct relationship set. `complete` means that set was
   returned without a known read limit; it does not claim every possible runtime
@@ -69,6 +77,24 @@ satisfy. A plan without execution does not establish runtime behavior.
   An assumed agent budget is insufficient justification for a limit. Name the
   ceiling and its recovery as described in
   [admission limits and recovery](design/limits-and-recovery.md).
+
+### Interpret boundary facts once
+
+The format or protocol reader owns interpretation. Pass its parsed facts and
+explicit uncertainty to consumers; do not make adapters reparse display text,
+reconstruct omitted values, or infer success from missing diagnostics.
+
+Keep format recognition separate from provider admission. A recognizable header
+can supply useful observations while later structure remains unresolved or a
+provider cannot accept the artifact. Report the reason at the affected boundary
+without erasing earlier observations or labeling unresolved input malformed.
+
+Derive validation from the field's own format and revision. A runtime API's
+narrower argument range need not constrain a wider on-disk field. A shared layout,
+magic, or version label need not identify every constructor or equality rule.
+When supported producer revisions differ, retain what the input establishes and
+state what it cannot distinguish. Static inspection does not establish that the
+artifact can execute successfully.
 
 ## Own the lifecycle
 

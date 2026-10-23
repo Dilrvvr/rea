@@ -4,15 +4,16 @@ import { z } from "zod";
 import {
   createEvidenceBundle,
   createImmutableEvidenceBundle,
-  describeEvidenceBundleFailure,
-  parseEvidenceBundle,
+  safeParseImmutableEvidenceBundle,
+  InvalidResidualUnknownGraphError,
   validateResidualUnknownAddition,
   type EvidenceBundle,
 } from "../../domain/evidenceBundle.js";
 import { AnalysisInputError } from "../../domain/analysisErrorCore.js";
 import { EvidenceIntegrityError } from "../../domain/evidenceErrors.js";
 import { UnknownRegistryError } from "../../domain/unknownRegistryError.js";
-import { immutableEvidence, type Evidence } from "../../domain/evidence.js";
+import type { Evidence } from "../../domain/evidence.js";
+import { safeParseImmutableEvidence } from "../../domain/evidenceValidation.js";
 import {
   createResidualUnknown,
   updateResidualUnknown,
@@ -44,21 +45,17 @@ type ImportResult = Result<
 
 /** Session-owned set of immutable evidence records. */
 export class EvidenceLedger {
-  readonly #records = new Map<string, Evidence>();
-  readonly #unknownRevisions = new Map<string, ResidualUnknown>();
-  readonly #unknownHeads = new Map<string, ResidualUnknown>();
+  #records = new Map<string, Evidence>();
+  #unknownRevisions = new Map<string, ResidualUnknown>();
+  #unknownHeads = new Map<string, ResidualUnknown>();
   /** Record evidence idempotently; conflicting content is rejected. */
   record(input: Evidence): RecordResult {
-    let evidence: Evidence;
-    try {
-      evidence = immutableEvidence(input);
-    } catch (cause: unknown) {
-      return err(
-        new EvidenceIntegrityError("Evidence record validation failed", {
-          cause,
-        }),
-      );
-    }
+    const authenticated = readLedgerEvidence(
+      input,
+      "Evidence record validation failed",
+    );
+    if (!authenticated.ok) return authenticated;
+    const evidence = authenticated.value;
     const existing = this.#records.get(evidence.evidence_id);
     if (existing !== undefined) {
       // A borrowed record is already authenticated and deeply immutable. Its
@@ -75,25 +72,24 @@ export class EvidenceLedger {
 
   /** Validate an entire bundle before atomically merging its records. */
   import(input: unknown): ImportResult {
-    let bundle: EvidenceBundle;
-    try {
-      bundle = parseEvidenceBundle(input);
-    } catch (cause: unknown) {
-      const failure = describeEvidenceBundleFailure(input, cause);
-      if (failure.kind === "single-record")
+    const parsed = safeParseImmutableEvidenceBundle(input);
+    if (!parsed.ok) {
+      const { kind, message, cause } = parsed.error;
+      if (kind === "single-record")
         return err(
           new AnalysisInputError("import_evidence_bundle", {
             cause,
-            userMessage: failure.message,
+            userMessage: message,
           }),
         );
       return err(
         new EvidenceIntegrityError("Evidence bundle validation failed", {
           cause,
-          userMessage: failure.message,
+          userMessage: message,
         }),
       );
     }
+    const bundle = parsed.value;
     // A record-only bundle cannot change the already-valid unknown graph. The
     // bundle parser has validated every incoming record and its manifests, so
     // checking ID conflicts and committing only the additions preserves the
@@ -118,9 +114,8 @@ export class EvidenceLedger {
         additions.set(evidence.evidence_id, evidence);
       }
       for (const [id, evidence] of replacements)
-        this.#records.set(id, immutableEvidence(evidence));
-      for (const [id, evidence] of additions)
-        this.#records.set(id, immutableEvidence(evidence));
+        this.#records.set(id, evidence);
+      for (const [id, evidence] of additions) this.#records.set(id, evidence);
       return ok({
         recordsAdded: additions.size,
         unknownsAdded: 0,
@@ -156,19 +151,14 @@ export class EvidenceLedger {
     }
     const checked = this.#validateCandidate(pending, pendingUnknowns);
     if (!checked.ok) {
-      if (checked.error instanceof UnknownRegistryError)
-        return err(
-          new EvidenceIntegrityError(
-            "Evidence bundle unknown registry failed",
-            {
-              cause: checked.error,
-            },
-          ),
-        );
-      return err(checked.error);
+      return err(
+        new EvidenceIntegrityError("Evidence bundle unknown registry failed", {
+          cause: checked.error,
+        }),
+      );
     }
     const added = pending.size - this.#records.size;
-    this.#commit(pending, pendingUnknowns);
+    this.#commit(checked.value);
     return ok({
       recordsAdded: added,
       unknownsAdded,
@@ -219,16 +209,12 @@ export class EvidenceLedger {
     ResidualUnknown,
     EvidenceIntegrityError | UnknownRegistryError | AnalysisInputError
   > {
-    let parsedMutation: Evidence;
-    try {
-      parsedMutation = immutableEvidence(mutationEvidence);
-    } catch (cause: unknown) {
-      return err(
-        new EvidenceIntegrityError("Unknown mutation evidence is invalid", {
-          cause,
-        }),
-      );
-    }
+    const authenticated = readLedgerEvidence(
+      mutationEvidence,
+      "Unknown mutation evidence is invalid",
+    );
+    if (!authenticated.ok) return authenticated;
+    const parsedMutation = authenticated.value;
     let unknown: ResidualUnknown;
     try {
       unknown = createResidualUnknown(
@@ -237,7 +223,8 @@ export class EvidenceLedger {
         parsedMutation.subject?.digest.sha256 ?? null,
       );
     } catch (cause: unknown) {
-      return err(unknownInputError("record_unknown", cause, input));
+      if (!(cause instanceof z.ZodError)) throw cause;
+      return err(requestInputError("record_unknown", cause, input));
     }
     if (this.#unknownHeads.has(unknown.unknown_id))
       return err(new UnknownRegistryError("already-exists"));
@@ -253,18 +240,18 @@ export class EvidenceLedger {
     ResidualUnknown | null,
     EvidenceIntegrityError | UnknownRegistryError
   > {
-    let evidence: Evidence;
-    let mutation: Evidence;
-    try {
-      evidence = immutableEvidence(evidenceInput);
-      mutation = immutableEvidence(mutationInput);
-    } catch (cause: unknown) {
-      return err(
-        new EvidenceIntegrityError("Atomic Evidence validation failed", {
-          cause,
-        }),
-      );
-    }
+    const authenticatedEvidence = readLedgerEvidence(
+      evidenceInput,
+      "Atomic Evidence validation failed",
+    );
+    if (!authenticatedEvidence.ok) return authenticatedEvidence;
+    const authenticatedMutation = readLedgerEvidence(
+      mutationInput,
+      "Atomic Evidence validation failed",
+    );
+    if (!authenticatedMutation.ok) return authenticatedMutation;
+    const evidence = authenticatedEvidence.value;
+    const mutation = authenticatedMutation.value;
     const existingEvidence = this.#records.get(evidence.evidence_id);
     if (
       existingEvidence !== undefined &&
@@ -279,6 +266,7 @@ export class EvidenceLedger {
         mutation.subject?.digest.sha256 ?? null,
       );
     } catch (cause: unknown) {
+      if (!(cause instanceof z.ZodError)) throw cause;
       return err(new UnknownRegistryError("invalid-transition", { cause }));
     }
     const creationUnknown = this.#unknownRevisions.get(
@@ -317,9 +305,15 @@ export class EvidenceLedger {
         mutationEvidence.evidence_id,
       );
     } catch (cause: unknown) {
-      return err(unknownInputError("update_unknown", cause, input));
+      if (!(cause instanceof z.ZodError)) throw cause;
+      return err(requestInputError("update_unknown", cause, input));
     }
-    return this.#appendUnknown(unknown, mutationEvidence);
+    const authenticated = readLedgerEvidence(
+      mutationEvidence,
+      "Unknown mutation evidence is invalid",
+    );
+    if (!authenticated.ok) return authenticated;
+    return this.#appendUnknown(unknown, authenticated.value);
   }
 
   /** Query current heads in stable ID order. */
@@ -393,23 +387,14 @@ export class EvidenceLedger {
 
   #appendUnknown(
     unknown: ResidualUnknown,
-    mutationEvidenceInput: Evidence,
+    mutationEvidence: Evidence,
   ): Result<ResidualUnknown, EvidenceIntegrityError | UnknownRegistryError> {
-    let mutationEvidence: Evidence;
-    try {
-      mutationEvidence = immutableEvidence(mutationEvidenceInput);
-    } catch (cause: unknown) {
-      return err(
-        new EvidenceIntegrityError("Unknown mutation evidence is invalid", {
-          cause,
-        }),
-      );
-    }
     const checked = this.#appendIncremental([mutationEvidence], unknown);
     if (!checked.ok) return checked;
     return ok(structuredClone(unknown));
   }
 
+  /** Incoming records were authenticated and sealed at the ingestion boundary. */
   #appendIncremental(
     records: readonly Evidence[],
     unknown?: ResidualUnknown,
@@ -441,10 +426,10 @@ export class EvidenceLedger {
           this.#unknownHeads,
         );
       } catch (cause: unknown) {
+        if (!(cause instanceof InvalidResidualUnknownGraphError)) throw cause;
         return err(new UnknownRegistryError("integrity", { cause }));
       }
-    for (const [id, evidence] of additions)
-      this.#records.set(id, immutableEvidence(evidence));
+    for (const [id, evidence] of additions) this.#records.set(id, evidence);
     if (unknown !== undefined && unknownKey !== undefined) {
       this.#unknownRevisions.set(unknownKey, unknown);
       this.#unknownHeads.set(unknown.unknown_id, unknown);
@@ -452,48 +437,60 @@ export class EvidenceLedger {
     return ok(undefined);
   }
 
+  /** Return the sealed candidate facts that the commit will adopt. */
   #validateCandidate(
     records: ReadonlyMap<string, Evidence>,
     unknowns: ReadonlyMap<string, ResidualUnknown>,
-  ): Result<void, EvidenceIntegrityError | UnknownRegistryError> {
+  ): Result<EvidenceBundle, UnknownRegistryError> {
     try {
-      createImmutableEvidenceBundle(
-        [...records.values()],
-        [...unknowns.values()],
+      return ok(
+        createImmutableEvidenceBundle(
+          [...records.values()],
+          [...unknowns.values()],
+        ),
       );
     } catch (cause: unknown) {
+      if (
+        !(cause instanceof z.ZodError) &&
+        !(cause instanceof InvalidResidualUnknownGraphError)
+      )
+        throw cause;
       return err(new UnknownRegistryError("integrity", { cause }));
     }
-    return ok(undefined);
   }
 
-  #commit(
-    records: ReadonlyMap<string, Evidence>,
-    unknowns: ReadonlyMap<string, ResidualUnknown>,
-  ): void {
-    this.#records.clear();
-    for (const [id, evidence] of records)
-      this.#records.set(id, immutableEvidence(evidence));
-    this.#unknownRevisions.clear();
-    this.#unknownHeads.clear();
-    for (const [key, unknown] of unknowns) {
-      this.#unknownRevisions.set(key, unknown);
-      const head = this.#unknownHeads.get(unknown.unknown_id);
+  #commit(bundle: EvidenceBundle): void {
+    const records = new Map(
+      bundle.records.map((evidence) => [evidence.evidence_id, evidence]),
+    );
+    const unknownRevisions = new Map(
+      bundle.unknowns.map((unknown) => [unknownRevisionKey(unknown), unknown]),
+    );
+    const unknownHeads = new Map<string, ResidualUnknown>();
+    for (const unknown of bundle.unknowns) {
+      const head = unknownHeads.get(unknown.unknown_id);
       if (head === undefined || head.revision < unknown.revision)
-        this.#unknownHeads.set(unknown.unknown_id, unknown);
+        unknownHeads.set(unknown.unknown_id, unknown);
     }
+    this.#records = records;
+    this.#unknownRevisions = unknownRevisions;
+    this.#unknownHeads = unknownHeads;
   }
 }
 
-/** A caller's unknown that fails its schema is an input mistake, not a state change. */
-const unknownInputError = (
-  operation: "record_unknown" | "update_unknown",
-  cause: unknown,
-  input: RecordUnknownInput | UpdateUnknownInput,
-): UnknownRegistryError | AnalysisInputError =>
-  cause instanceof z.ZodError
-    ? requestInputError(operation, cause, input)
-    : new UnknownRegistryError("invalid-transition", { cause });
+const readLedgerEvidence = (
+  input: unknown,
+  message: string,
+): Result<Evidence, EvidenceIntegrityError> => {
+  const checked = safeParseImmutableEvidence(input);
+  return checked.ok
+    ? checked
+    : err(
+        new EvidenceIntegrityError(message, {
+          cause: checked.error,
+        }),
+      );
+};
 
 const unknownRevisionKey = (unknown: ResidualUnknown): string =>
   `${unknown.unknown_id}:${String(unknown.revision)}`;

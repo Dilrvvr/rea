@@ -71,11 +71,64 @@ const atomLength = (
   if (at >= payload.length) fail("BEAM atom table is truncated.");
   const first = payload[at]!;
   if (!compact) return [first, at + 1];
-  if ((first & 0x07) !== 0) fail("BEAM atom length is not a u tag.");
-  if ((first & 0x08) === 0) return [first >> 4, at + 1];
-  if ((first & 0x10) !== 0) fail("BEAM atom length encoding is unsupported.");
-  if (at + 1 >= payload.length) fail("BEAM atom table is truncated.");
-  return [((first & 0xe0) << 3) | payload[at + 1]!, at + 2];
+  const decoded = compactUnsigned(payload, at);
+  if (decoded.value > BigInt(payload.length - decoded.next))
+    fail("BEAM atom table is truncated.");
+  return [Number(decoded.value), decoded.next];
+};
+
+/** Decode OTP's compact unsigned `u` tag without allocating from its value. */
+const compactUnsigned = (
+  payload: Buffer,
+  at: number,
+): { value: bigint; next: number } => {
+  let cursor = at;
+  let value: bigint;
+  for (;;) {
+    if (cursor >= payload.length) fail("BEAM atom table is truncated.");
+    const first = payload[cursor]!;
+    if ((first & 0x07) !== 0) fail("BEAM atom length is not a u tag.");
+    if ((first & 0x08) === 0) {
+      value = BigInt(first >> 4);
+      cursor += 1;
+      break;
+    }
+    if ((first & 0x10) === 0) {
+      if (cursor + 1 >= payload.length) fail("BEAM atom table is truncated.");
+      value = BigInt(((first >> 5) << 8) | payload[cursor + 1]!);
+      cursor += 2;
+      break;
+    }
+    const byteCountCode = first >> 5;
+    cursor += 1;
+    // OTP's size-of-size form always produces at least a 9-byte integer.
+    // unpack_varint rejects any value wider than SWord, even with leading
+    // zeroes, so no unsigned atom length can be represented by this form.
+    if (byteCountCode === 7) fail("BEAM atom length encoding overflows.");
+    value = readCompactUnsignedBytes(payload, cursor, byteCountCode + 2);
+    cursor += byteCountCode + 2;
+    break;
+  }
+  return { value, next: cursor };
+};
+
+const readCompactUnsignedBytes = (
+  payload: Buffer,
+  at: number,
+  byteCount: number,
+): bigint => {
+  if (byteCount > payload.length - at) fail("BEAM atom table is truncated.");
+  // OTP's unpack_varint only accepts values that fit a signed machine word.
+  // For REA's supported 64-bit runtime target, that is at most eight bytes.
+  const maxValue = 9_223_372_036_854_775_807n;
+  let value = 0n;
+  for (let index = 0; index < byteCount; index += 1) {
+    const byte = BigInt(payload[at + index]!);
+    if (value > (maxValue - byte) >> 8n)
+      fail("BEAM atom length encoding overflows.");
+    value = (value << 8n) | byte;
+  }
+  return value;
 };
 
 const parseAtoms = (
@@ -192,9 +245,6 @@ export const parseErlangBeam = (
     requireRange(bytes, payloadOffset, size);
     const padded = payloadOffset + size + ((4 - (size % 4)) % 4);
     if (padded > formEnd) fail("BEAM chunk padding exceeds the form.");
-    const padding = bytes.subarray(payloadOffset + size, padded);
-    if (padding.some((byte) => byte !== 0))
-      fail("BEAM chunk padding is non-zero.");
     const payload = bytes.subarray(payloadOffset, payloadOffset + size);
     chunks.push({
       index: chunks.length,
@@ -206,7 +256,9 @@ export const parseErlangBeam = (
         sha256: sha256(payload),
       },
     });
-    if (!payloads.has(name)) payloads.set(name, { payload, offset: at });
+    // OTP's loader replaces the selected payload on each matching chunk.
+    // Keep every occurrence above; decode the last occurrence of each name.
+    payloads.set(name, { payload, offset: at });
     at = padded;
   }
   const atomChunk = payloads.get("AtU8") ?? payloads.get("Atom");

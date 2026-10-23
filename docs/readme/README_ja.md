@@ -1,7 +1,7 @@
 <div align="center">
 
 [English](../../README.md) · [简体中文](README_zh.md) · [繁體中文](README_zh-TW.md) · **日本語** · [한국어](README_ko.md) · [Türkçe](README_tr.md) · [Русский](README_ru.md) · [Tiếng Việt](README_vi.md) · [ไทย](README_th.md) · [Deutsch](README_de.md) · [Español](README_es.md) · [Français](README_fr.md) · [Українська](README_uk.md) · [Polski](README_pl.md) · [Português (Brasil)](README_pt-BR.md) · [العربية](README_ar.md) · [فارسی](README_fa.md) · [Bahasa Indonesia](README_id.md) · [Italiano](README_it.md)
-· [Ελληνικά](README_el.md) · [മലയാളം](README_ml.md)
+· [Ελληνικά](README_el.md) · [മലയാളം](README_ml.md) · [Roman Urdu](README_ur-Latn.md)
 
 # REA：あらゆるものをリバースエンジニアリング
 
@@ -137,7 +137,7 @@ npx rea-agents@latest setup
 
 ## 分析できる対象
 
-REA には Node.js 22.x（>=22.19）、24.x（>=24.11）、または 26+ と npm が必要です。追加のツールや対応ホストは、対象によって異なります。
+REA には Node.js 22.x（>=22.23.4）、24.x（>=24.22.1）、または 26+ (>=26.12.1) と npm が必要です。追加のツールや対応ホストは、対象によって異なります。
 
 | 対象                             | REA が返すもの                                                                              | 要件とガイド                                                                                                                                   |
 | -------------------------------- | ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |

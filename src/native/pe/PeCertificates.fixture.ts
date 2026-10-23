@@ -66,6 +66,7 @@ const algorithm = (identifier: Buffer): Buffer => seq(identifier, nul());
 export const pkcs7SignedDataFixture = (
   commonName = "REA Fixture",
   organization = "REA Tests",
+  signature = octet(Buffer.from("sig")),
 ): Buffer => {
   const serial = Buffer.from([0x11, 0x22, 0x33, 0x44]);
   const subject = name(commonName, organization);
@@ -92,7 +93,7 @@ export const pkcs7SignedDataFixture = (
     seq(subject, integer(serial)),
     algorithm(SHA256),
     algorithm(SHA256_RSA),
-    octet(Buffer.from("sig")),
+    signature,
   );
   const signedData = seq(
     integer(1),
@@ -102,6 +103,22 @@ export const pkcs7SignedDataFixture = (
     set(signer),
   );
   return seq(SIGNED_DATA, context(0, signedData));
+};
+
+/** Same CMS fields with a BER indefinite-length outer ContentInfo SEQUENCE. */
+export const pkcs7SignedDataIndefiniteEnvelopeFixture = (): Buffer => {
+  const definite = pkcs7SignedDataFixture();
+  const firstLength = definite[1];
+  if (firstLength === undefined) throw new Error("Missing ContentInfo length");
+  let contentOffset = 2;
+  if ((firstLength & 0x80) !== 0) contentOffset += firstLength & 0x7f;
+  if (contentOffset > definite.length)
+    throw new Error("Invalid fixture ContentInfo length");
+  return Buffer.concat([
+    Buffer.from([0x30, 0x80]),
+    definite.subarray(contentOffset),
+    Buffer.from([0, 0]),
+  ]);
 };
 
 /** Minimal PE32/PE32+ image with an overlay IMAGE_DIRECTORY_ENTRY_SECURITY table. */

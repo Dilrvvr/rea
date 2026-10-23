@@ -1,7 +1,7 @@
 <div align="center" dir="rtl">
 
 [English](../../README.md) · [简体中文](README_zh.md) · [繁體中文](README_zh-TW.md) · [日本語](README_ja.md) · [한국어](README_ko.md) · [Türkçe](README_tr.md) · [Русский](README_ru.md) · [Tiếng Việt](README_vi.md) · [ไทย](README_th.md) · [Deutsch](README_de.md) · [Español](README_es.md) · [Français](README_fr.md) · [Українська](README_uk.md) · [Polski](README_pl.md) · [Português (Brasil)](README_pt-BR.md) · [العربية](README_ar.md) · **فارسی** · [Bahasa Indonesia](README_id.md) · [Italiano](README_it.md)
-· [Ελληνικά](README_el.md) · [മലയാളം](README_ml.md)
+· [Ελληνικά](README_el.md) · [മലയാളം](README_ml.md) · [Roman Urdu](README_ur-Latn.md)
 
 # REA: مهندسی معکوس هر چیزی
 
@@ -129,7 +129,7 @@ npx rea-agents@latest setup
 
 ## چه چیزهایی را می‌توان تحلیل کرد؟
 
-REA به Node.js 22.x (>=22.19)، 24.x (>=24.11) یا 26+، به‌همراه npm نیاز دارد. ابزارهای اضافی و پشتیبانی سیستم میزبان به نوع هدف بستگی دارند:
+REA به Node.js 22.x (>=22.23.4)، 24.x (>=24.22.1) یا 26+ (>=26.12.1)، به‌همراه npm نیاز دارد. ابزارهای اضافی و پشتیبانی سیستم میزبان به نوع هدف بستگی دارند:
 
 | هدف                    | خروجی REA                                                                           | پیش‌نیازها و راهنما                                                                                                                |
 | ---------------------- | ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |

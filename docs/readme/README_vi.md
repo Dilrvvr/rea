@@ -1,7 +1,7 @@
 <div align="center">
 
 [English](../../README.md) · [简体中文](README_zh.md) · [繁體中文](README_zh-TW.md) · [日本語](README_ja.md) · [한국어](README_ko.md) · [Türkçe](README_tr.md) · [Русский](README_ru.md) · **Tiếng Việt** · [ไทย](README_th.md) · [Deutsch](README_de.md) · [Español](README_es.md) · [Français](README_fr.md) · [Українська](README_uk.md) · [Polski](README_pl.md) · [Português (Brasil)](README_pt-BR.md) · [العربية](README_ar.md) · [فارسی](README_fa.md) · [Bahasa Indonesia](README_id.md) · [Italiano](README_it.md)
-· [Ελληνικά](README_el.md) · [മലയാളം](README_ml.md)
+· [Ελληνικά](README_el.md) · [മലയാളം](README_ml.md) · [Roman Urdu](README_ur-Latn.md)
 
 # REA: Kỹ thuật dịch ngược cho mọi thứ
 
@@ -137,7 +137,7 @@ Tác nhân gọi REA qua MCP để kiểm tra mục tiêu và lần theo mã li�
 
 ## Những gì bạn có thể phân tích
 
-REA yêu cầu Node.js 22.x (>=22.19), 24.x (>=24.11) hoặc 26+, cùng với npm. Công cụ bổ sung và nền tảng chạy REA được hỗ trợ tùy thuộc vào mục tiêu:
+REA yêu cầu Node.js 22.x (>=22.23.4), 24.x (>=24.22.1) hoặc 26+ (>=26.12.1), cùng với npm. Công cụ bổ sung và nền tảng chạy REA được hỗ trợ tùy thuộc vào mục tiêu:
 
 | Mục tiêu                          | REA trả về gì                                                                                                   | Yêu cầu và hướng dẫn                                                                                                                      |
 | --------------------------------- | --------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |

@@ -72,6 +72,16 @@ const safeModuleName = (node: Node | null | undefined): string | undefined => {
   return undefined;
 };
 
+const exactStringModuleName = (
+  node: Node | null | undefined,
+): string | undefined => {
+  if (node === null || node === undefined) return undefined;
+  const literal = readExactJavaScriptLiteral(node);
+  return literal.found && typeof literal.value === "string"
+    ? literal.value
+    : undefined;
+};
+
 const resolveSpecifier = (
   specifier: string,
 ): ReferenceSourceImportResolution => {
@@ -93,20 +103,17 @@ const moduleSpecifierFromExpression = (
 ):
   | { specifier: string; parseState: ReferenceSourceImportParseState }
   | undefined => {
-  if (expression === null || expression === undefined) return undefined;
-  const literal = readExactJavaScriptLiteral(expression);
-  if (literal.found && typeof literal.value === "string")
-    return { specifier: literal.value, parseState: "parsed" };
+  const specifier = exactStringModuleName(expression);
+  if (specifier !== undefined) return { specifier, parseState: "parsed" };
   if (
     isCallExpression(expression) &&
     isImport(expression.callee) &&
     expression.arguments.length > 0
   ) {
-    const first = expression.arguments[0];
-    if (isStringLiteral(first)) {
-      return { specifier: first.value, parseState: "parsed" };
-    }
-    return { specifier: "<dynamic-import>", parseState: "partial" };
+    const nestedSpecifier = exactStringModuleName(expression.arguments[0]);
+    return nestedSpecifier === undefined
+      ? { specifier: "<dynamic-import>", parseState: "partial" }
+      : { specifier: nestedSpecifier, parseState: "parsed" };
   }
   return undefined;
 };
@@ -142,6 +149,23 @@ const appendRelationship = (
   });
 };
 
+const appendImportEquals = (
+  statement: Node,
+  from_path: string,
+  relationships: ReferenceSourceImportRelationship[],
+  limitations: string[],
+): void => {
+  if (!isTSImportEqualsDeclaration(statement)) return;
+  const reference = statement.moduleReference;
+  if (!isTSExternalModuleReference(reference)) return;
+  appendRelationship(relationships, limitations, {
+    fromPath: from_path,
+    to: safeModuleName(reference.expression),
+    kind: "requires",
+    parseState: "parsed",
+  });
+};
+
 const extractImportDeclarations = (
   body: readonly Node[],
   from_path: string,
@@ -167,7 +191,16 @@ const extractImportDeclarations = (
           kind: "imports",
           parseState: "parsed",
         });
-      }
+      } else if (
+        statement.declaration !== null &&
+        statement.declaration !== undefined
+      )
+        appendImportEquals(
+          statement.declaration,
+          from_path,
+          relationships,
+          limitations,
+        );
       continue;
     }
 
@@ -182,15 +215,7 @@ const extractImportDeclarations = (
     }
 
     if (isTSImportEqualsDeclaration(statement)) {
-      const reference = statement.moduleReference;
-      if (isTSExternalModuleReference(reference)) {
-        appendRelationship(relationships, limitations, {
-          fromPath: from_path,
-          to: safeModuleName(reference.expression),
-          kind: "requires",
-          parseState: "parsed",
-        });
-      }
+      appendImportEquals(statement, from_path, relationships, limitations);
       continue;
     }
 
@@ -248,7 +273,7 @@ const extractRequireAndDynamicImports = (
 
   for (const call of expressions) {
     if (isImportExpression(call)) {
-      const specifier = safeModuleName(call.source);
+      const specifier = exactStringModuleName(call.source);
       appendRelationship(relationships, limitations, {
         fromPath: from_path,
         to: specifier ?? "<dynamic-import>",

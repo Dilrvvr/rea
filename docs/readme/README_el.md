@@ -1,6 +1,6 @@
 <div align="center">
 
-[English](../../README.md) · [简体中文](README_zh.md) · [繁體中文](README_zh-TW.md) · [日本語](README_ja.md) · [한국어](README_ko.md) · [Türkçe](README_tr.md) · [Русский](README_ru.md) · [Tiếng Việt](README_vi.md) · [ไทย](README_th.md) · [Deutsch](README_de.md) · [Español](README_es.md) · [Français](README_fr.md) · [Українська](README_uk.md) · [Polski](README_pl.md) · [Português (Brasil)](README_pt-BR.md) · [العربية](README_ar.md) · [فارسی](README_fa.md) · [Bahasa Indonesia](README_id.md) · [Italiano](README_it.md) · **Ελληνικά** · [മലയാളം](README_ml.md)
+[English](../../README.md) · [简体中文](README_zh.md) · [繁體中文](README_zh-TW.md) · [日本語](README_ja.md) · [한국어](README_ko.md) · [Türkçe](README_tr.md) · [Русский](README_ru.md) · [Tiếng Việt](README_vi.md) · [ไทย](README_th.md) · [Deutsch](README_de.md) · [Español](README_es.md) · [Français](README_fr.md) · [Українська](README_uk.md) · [Polski](README_pl.md) · [Português (Brasil)](README_pt-BR.md) · [العربية](README_ar.md) · [فارسی](README_fa.md) · [Bahasa Indonesia](README_id.md) · [Italiano](README_it.md) · **Ελληνικά** · [മലയാളം](README_ml.md) · [Roman Urdu](README_ur-Latn.md)
 
 # REA: Reverse Engineer Anything
 
@@ -141,7 +141,7 @@ npx rea-agents@latest setup
 
 ## Τι μπορείς να αναλύσεις
 
-Το REA απαιτεί Node.js 22.x (>=22.19), 24.x (>=24.11) ή 26+, καθώς και npm. Τα πρόσθετα εργαλεία και τα υποστηριζόμενα συστήματα εξαρτώνται από τον στόχο:
+Το REA απαιτεί Node.js 22.x (>=22.23.4), 24.x (>=24.22.1) ή 26+ (>=26.12.1), καθώς και npm. Τα πρόσθετα εργαλεία και τα υποστηριζόμενα συστήματα εξαρτώνται από τον στόχο:
 
 | Στόχος                                 | Τι επιστρέφει το REA                                                                                                        | Απαιτήσεις και οδηγός                                                                                                               |
 | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |

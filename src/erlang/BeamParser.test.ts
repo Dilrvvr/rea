@@ -79,6 +79,52 @@ it("reads atoms, exports, imports, lambdas and the Code header", () => {
   ]);
 });
 
+it("selects the last table and Code payload for every repeated chunk name", () => {
+  const original = erlangBeamFixture("selected");
+  const decoy = erlangBeamFixture("decoy");
+  const changedFields = new Map([
+    ["Code", 16],
+    ["ExpT", 8],
+    ["ImpT", 12],
+    ["FunT", 8],
+  ]);
+  for (let at = 12; at < decoy.length;) {
+    const name = decoy.toString("latin1", at, at + 4);
+    const size = decoy.readUInt32BE(at + 4);
+    const field = changedFields.get(name);
+    if (field !== undefined) decoy.writeUInt32BE(9, at + 8 + field);
+    at += 8 + size + ((4 - (size % 4)) % 4);
+  }
+  const repeated = Buffer.concat([
+    original.subarray(0, 12),
+    decoy.subarray(12),
+    original.subarray(12),
+  ]);
+  repeated.writeUInt32BE(repeated.length - 8, 4);
+  const report = parse(repeated);
+  const control = parse(original);
+  expect(report.atoms).toEqual(control.atoms);
+  expect(report.exports).toEqual(control.exports);
+  expect(report.imports).toEqual(control.imports);
+  expect(report.lambdas).toEqual(control.lambdas);
+  expect(report.code).toEqual({
+    ...control.code,
+    instructions: {
+      ...control.code!.instructions,
+      offset: control.code!.instructions.offset + decoy.length - 12,
+    },
+  });
+  expect(report.chunks).toHaveLength(control.chunks.length * 2);
+});
+
+it("rejects a malformed selected atom table instead of using an earlier table", () => {
+  const original = erlangBeamFixture();
+  const invalid = singleChunkBeam("AtU8", Buffer.alloc(0));
+  const repeated = Buffer.concat([original, invalid.subarray(12)]);
+  repeated.writeUInt32BE(repeated.length - 8, 4);
+  expect(() => parse(repeated)).toThrow(/truncated/);
+});
+
 // Expected values come from beam_lib:chunks/2 on the same file under OTP 29.
 it("reads a compiler-produced OTP 29 BEAM with the compact atom table", () => {
   const report = parse(erlangBeamOtp29Fixture());
@@ -112,6 +158,39 @@ it("reads a compiler-produced OTP 29 BEAM with the compact atom table", () => {
     extra_header_bytes: 0,
     instructions: { bytes: 49 },
   });
+});
+
+it("accepts extended compact atom lengths and rejects truncated or overflowing values", () => {
+  const compactAtom = (length: Buffer, name: Buffer): Buffer =>
+    singleChunkBeam(
+      "AtU8",
+      Buffer.concat([Buffer.from([0xff, 0xff, 0xff, 0xff]), length, name]),
+    );
+  const name = Buffer.from("0123456789abcdef", "ascii");
+  const extended = parse(compactAtom(Buffer.from([0x18, 0x00, 0x10]), name));
+  expect(extended.module).toBe(name.toString("ascii"));
+  expect(() => parse(compactAtom(Buffer.from([0x18, 0x00]), name))).toThrow(
+    /BEAM atom table is truncated/,
+  );
+  expect(() => parse(compactAtom(Buffer.from([0x19]), name))).toThrow(
+    /BEAM atom length is not a u tag/,
+  );
+  expect(() =>
+    parse(
+      compactAtom(
+        Buffer.from([0xd8, 0x80, 0, 0, 0, 0, 0, 0, 0]),
+        Buffer.alloc(0),
+      ),
+    ),
+  ).toThrow(/BEAM atom length encoding overflows/);
+  expect(() =>
+    parse(
+      compactAtom(
+        Buffer.from([0xf8, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        Buffer.alloc(0),
+      ),
+    ),
+  ).toThrow(/BEAM atom length encoding overflows/);
 });
 
 it("fails a truncated FOR1 container without partial success", () => {

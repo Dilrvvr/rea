@@ -5,7 +5,9 @@ import {
   type ClockFormat,
 } from "../../domain/analysisView/environmentStateWriteValues.js";
 import type { JsonValue } from "../../domain/jsonValue.js";
+import type { ReplayedBody } from "./environmentSource.js";
 import {
+  ID_FIELD,
   IDENTITY_FIELD,
   keyedByLearnedIds,
   pairElements,
@@ -50,7 +52,11 @@ export interface Normalised {
 /** At most this many differences are kept per step. */
 export const STEP_DIFFERENCE_LIMIT = 20;
 const VALUE_CHARS = 120;
-const TIME_FIELD = /(at|time|date|timestamp|created|updated|modified)$/iu;
+const TIME_FIELD =
+  /(?:^|[_-])(?:at|time|date|timestamp|created|updated|modified)$/iu;
+const TIME_FIELD_CAMEL =
+  /(?:At|Time|Date|Timestamp|Created|Updated|Modified)$/u;
+const ID_LIST_FIELD = /^(ids|uuids|guids)$/u;
 
 const isObject = (value: JsonValue | undefined): value is JsonObject =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -73,7 +79,12 @@ const clockFormat = (
   value: JsonValue,
   key: string | undefined,
 ): string | undefined => {
-  if (typeof value === "number" && key !== undefined && !TIME_FIELD.test(key))
+  if (
+    typeof value === "number" &&
+    key !== undefined &&
+    !TIME_FIELD.test(key) &&
+    !TIME_FIELD_CAMEL.test(key)
+  )
     return undefined;
   const clock = readClock(value);
   return clock === undefined ? undefined : formatKey(clock.format);
@@ -168,10 +179,18 @@ class Differ {
       (typeof live === "string" || typeof live === "number") &&
       (typeof env === "string" || typeof env === "number")
     ) {
-      const mapped = this.map.env(
-        live,
-        this.#inCollection(pointer, at) ? this.entity.scope : undefined,
-      );
+      const mapsAsId =
+        (key !== undefined && ID_FIELD.test(key)) ||
+        this.#inCollection(pointer, at) ||
+        (typeof live === "string" &&
+          key !== undefined &&
+          this.map.isStateReference(live, key));
+      const mapped = mapsAsId
+        ? this.map.env(
+            live,
+            this.#inCollection(pointer, at) ? this.entity.scope : undefined,
+          )
+        : undefined;
       if (mapped !== undefined && String(mapped) === String(env)) {
         this.normalised.ids += 1;
         return;
@@ -236,8 +255,17 @@ class Differ {
       item === null || typeof item !== "object";
     if (live.length !== env.length || !live.every(scalar) || !env.every(scalar))
       return false;
-    // Live ids compare in the environment's terms, as scalar values do.
-    const mapped = live.map((item) => translateValue(item, this.map));
+    // Only identifier lists or known string identifiers are translated; numeric measurements stay literal.
+    const field = pointer.slice(pointer.lastIndexOf("/") + 1);
+    const mapped = live.map((item) => {
+      if (
+        (typeof item === "string" && this.map.isStateReference(item, field)) ||
+        ((typeof item === "number" || typeof item === "string") &&
+          ID_LIST_FIELD.test(field))
+      )
+        return translateValue(item, this.map);
+      return item;
+    });
     const key = (items: JsonValue[]): string =>
       JSON.stringify(items.map((item) => JSON.stringify(item)).sort());
     if (key(mapped) !== key(env)) return false;
@@ -259,7 +287,9 @@ class Differ {
     // An object keyed by ids compares each member under the environment's key; any other compares field by field.
     const keyed = keyedByLearnedIds(live, env, this.map);
     const envKey = (key: string): string => {
-      const mapped = keyed ? this.map.env(key) : undefined;
+      const mapped = keyed
+        ? this.map.env(key, self ? this.entity.scope : undefined)
+        : undefined;
       return mapped !== undefined && Object.hasOwn(env, String(mapped))
         ? String(mapped)
         : key;
@@ -276,7 +306,11 @@ class Differ {
         });
       else {
         matched.add(other);
-        this.value(value, env[other]!, child, { key, own: self });
+        this.value(value, env[other]!, child, {
+          key,
+          own: self,
+          keyed: self && keyed,
+        });
       }
     }
     for (const [key, value] of Object.entries(env))
@@ -293,12 +327,21 @@ class Differ {
     live: JsonValue,
     env: JsonValue,
     pointer: string,
-    at: { readonly key?: string; readonly own?: boolean } = {},
+    at: {
+      readonly key?: string;
+      readonly own?: boolean;
+      readonly keyed?: boolean;
+    } = {},
   ): void {
     if (Array.isArray(live) && Array.isArray(env))
       this.array(live, env, pointer);
     else if (isObject(live) && isObject(env))
-      this.object(live, env, pointer, at.own === true && at.key === undefined);
+      this.object(
+        live,
+        env,
+        pointer,
+        at.own === true && (at.key === undefined || at.keyed === true),
+      );
     else if (
       Array.isArray(live) ||
       Array.isArray(env) ||
@@ -318,9 +361,7 @@ class Differ {
 /** One answer: its status, and its JSON body, its text, or null without one. */
 export interface Answer {
   readonly status: number | null;
-  readonly body: JsonValue;
-  /** Set when the body was over the replay limit, so only a prefix is known. */
-  readonly cut?: boolean;
+  readonly body: ReplayedBody;
   /** Set when the probe did not record the body, so only the status is known. */
   readonly unobserved?: boolean;
 }
@@ -348,8 +389,50 @@ export const compareAnswers = (
       live: String(live.status),
       env: String(env.status),
     });
-  if (live.cut === true) differ.normalised.large_bodies += 1;
+  if (
+    live.body.kind === "cut" ||
+    (live.body.kind === "base64" && !live.body.whole)
+  )
+    differ.normalised.large_bodies += 1;
   else if (live.unobserved === true) differ.normalised.unobserved_bodies += 1;
-  else differ.value(live.body, env.body, "");
+  else if (
+    (live.body.kind === "none" &&
+      env.body.kind === "json" &&
+      env.body.value === null) ||
+    (env.body.kind === "none" &&
+      live.body.kind === "json" &&
+      live.body.value === null)
+  ) {
+    // The existing answer contract treats an absent body and JSON null alike.
+  } else if (live.body.kind === "base64" || env.body.kind === "base64") {
+    const bytes = (body: ReplayedBody): Buffer | undefined => {
+      if (body.kind === "base64") return Buffer.from(body.encoded, "base64");
+      if (body.kind === "text") return Buffer.from(body.text, "utf8");
+      return undefined;
+    };
+    const liveBytes = bytes(live.body);
+    const envBytes = bytes(env.body);
+    if (
+      liveBytes === undefined ||
+      envBytes === undefined ||
+      !liveBytes.equals(envBytes)
+    )
+      differ.add({
+        category: "value",
+        pointer: "",
+        live: shown(live.body),
+        env: shown(env.body),
+      });
+  } else if (live.body.kind !== env.body.kind)
+    differ.add({
+      category: "value",
+      pointer: "",
+      live: shown(live.body),
+      env: shown(env.body),
+    });
+  else if (live.body.kind === "json" && env.body.kind === "json")
+    differ.value(live.body.value, env.body.value, "");
+  else if (live.body.kind === "text" && env.body.kind === "text")
+    differ.value(live.body.text, env.body.text, "");
   return { differences: differ.differences, normalised: differ.normalised };
 };

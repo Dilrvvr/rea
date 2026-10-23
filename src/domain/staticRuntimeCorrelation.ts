@@ -2,7 +2,7 @@ import { digestCanonicalValue } from "./canonicalDigest.js";
 import { z } from "zod";
 
 import { artifactComparisonResultSchema } from "./artifactComparison.js";
-import { AnalysisInputError } from "./analysisErrorCore.js";
+import type { AnalysisInputError } from "./analysisErrorCore.js";
 import { EvidenceIntegrityError } from "./evidenceErrors.js";
 import { analysisInputErrorFromIssues } from "./inputIssueProjection.js";
 import { readEvidence, readEvidencePayload } from "./evidenceValidation.js";
@@ -14,7 +14,10 @@ import {
 } from "./comparisonSourceEvidence.js";
 import { evidenceSchema, type Evidence } from "./evidence.js";
 import { hasComparisonEvidenceIdentity } from "./comparisonEvidenceIdentity.js";
-import { functionComparisonResultSchema } from "./functionComparisonSchemas.js";
+import {
+  functionComparisonDimensionNameSchema,
+  functionComparisonResultSchema,
+} from "./functionComparisonSchemas.js";
 import type { JsonValue } from "./jsonValue.js";
 import {
   comparisonStatusSchema,
@@ -24,16 +27,6 @@ import { PROCESS_COMPARISON_DIMENSIONS } from "./process/processComparison.js";
 import { prefixedDigestSchema } from "./../domain/digests.js";
 
 const evidenceIdSchema = prefixedDigestSchema("ev");
-const functionDimensionSchema = z.enum([
-  "identity",
-  "pseudocode",
-  "assembly",
-  "comments",
-  "calls",
-  "references",
-  "strings_names",
-  "cfg",
-]);
 const runtimeDimensionSchema = z.enum(PROCESS_COMPARISON_DIMENSIONS);
 const expectedPatternSchema = z.enum([
   "cochanged",
@@ -54,7 +47,10 @@ const artifactSelectorSchema = z
   })
   .strict();
 const functionSelectorSchema = z
-  .object({ kind: z.literal("function"), dimension: functionDimensionSchema })
+  .object({
+    kind: z.literal("function"),
+    dimension: functionComparisonDimensionNameSchema,
+  })
   .strict();
 const staticSelectorSchema = z.discriminatedUnion("kind", [
   artifactSelectorSchema,
@@ -173,11 +169,11 @@ export const correlateStaticAndRuntime = (
 ): StaticRuntimeCorrelationResult => {
   const parsed = staticRuntimeCorrelationEnvelopeSchema.safeParse(input);
   if (!parsed.success)
-    throw inputSchemaError(
-      input,
-      parsed.error,
-      "Provide valid static and runtime comparison Evidence and mappings.",
-    );
+    throw analysisInputErrorFromIssues(OPERATION, parsed.error.issues, input, {
+      cause: parsed.error,
+      userMessage:
+        "Provide valid static and runtime comparison Evidence and mappings.",
+    });
   const { data } = parsed;
   const staticEvidence = data.static_comparisons.map((item, index) =>
     parseStatic(item, input, index),
@@ -333,16 +329,11 @@ const selectStatic = (
         "Function selector requires function comparison Evidence",
       );
     const result = comparison.result;
-    const matches = result.dimensions.filter(
+    const match = result.dimensions.find(
       ({ dimension }) => dimension === selector.dimension,
     );
-    const match = matches.at(0);
-    if (matches.length !== 1 || match === undefined)
-      throw callerInputError(
-        input,
-        path,
-        "Function selector must resolve exactly once",
-      );
+    if (match === undefined)
+      throw evidenceIntegrityError("Function comparison dimension missing");
     return {
       status: match.status,
       conclusion_kind: match.conclusion_kind,
@@ -522,38 +513,15 @@ const firstDuplicateIndex = (values: readonly string[]): number | undefined => {
 
 const OPERATION = "correlate_static_and_runtime";
 
-const inputSchemaError = (
-  input: unknown,
-  cause: z.ZodError,
-  userMessage: string,
-): AnalysisInputError => {
-  const projected = analysisInputErrorFromIssues(
-    OPERATION,
-    cause.issues,
-    input,
-    { cause },
-  );
-  return new AnalysisInputError(
-    OPERATION,
-    { cause, userMessage },
-    projected.issues,
-  );
-};
-
 const callerInputError = (
   input: unknown,
   path: readonly (string | number)[],
   message: string,
-): AnalysisInputError => {
-  const projected = analysisInputErrorFromIssues(OPERATION, [], input, {
+): AnalysisInputError =>
+  analysisInputErrorFromIssues(OPERATION, [], input, {
+    userMessage: message,
     additionalIssues: [{ path, reason: "invalid_value", message }],
   });
-  return new AnalysisInputError(
-    OPERATION,
-    { userMessage: message },
-    projected.issues,
-  );
-};
 
 const evidenceIntegrityError = (message: string): EvidenceIntegrityError =>
   new EvidenceIntegrityError(message, { userMessage: message });

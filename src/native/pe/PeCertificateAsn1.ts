@@ -1,3 +1,9 @@
+import {
+  Asn1BerFailure,
+  Asn1BerReader,
+  type Asn1BerNode,
+} from "../../domain/asn1Ber.js";
+
 const OID_NAMES: Readonly<Record<string, string>> = {
   "1.2.840.113549.1.7.1": "data",
   "1.2.840.113549.1.7.2": "signedData",
@@ -19,24 +25,17 @@ const OID_NAMES: Readonly<Record<string, string>> = {
   "2.16.840.1.101.3.4.2.3": "sha512",
 };
 
-export interface DerNode {
-  readonly tag: number;
-  readonly constructed: boolean;
-  readonly start: number;
-  readonly end: number;
-  readonly content: Buffer;
-  readonly children: readonly DerNode[];
-}
+export type Asn1Node = Asn1BerNode;
 
-export class PeCertificateDerFailure extends Error {
+export class PeCertificateAsn1Failure extends Error {
   constructor(message: string) {
     super(message);
-    this.name = "PeCertificateDerFailure";
+    this.name = "PeCertificateAsn1Failure";
   }
 }
 
 const fail = (message: string): never => {
-  throw new PeCertificateDerFailure(message);
+  throw new PeCertificateAsn1Failure(message);
 };
 
 const required = <T>(value: T | undefined, message: string): T =>
@@ -44,66 +43,22 @@ const required = <T>(value: T | undefined, message: string): T =>
 
 // Authenticode signatures with full chains and countersignatures decode to a
 // few thousand nodes; the budget bounds sibling fan-out, which depth does not.
-export const DER_NODE_BUDGET = 16_384;
+export const ASN1_NODE_BUDGET = 16_384;
 
-interface DerBudget {
-  remaining: number;
-}
+/** Decode one bounded ASN.1 TLV, including indefinite constructed BER values. */
+export const readAsn1 = (bytes: Buffer): Asn1Node => {
+  try {
+    return new Asn1BerReader(bytes, ASN1_NODE_BUDGET).read();
+  } catch (cause: unknown) {
+    if (cause instanceof Asn1BerFailure) return fail(cause.message);
+    throw cause;
+  }
+};
 
-/** Decode one DER/BER TLV; constructed nodes own their child sequence. */
-export const readDer = (
-  bytes: Buffer,
-  offset = 0,
-  end = bytes.length,
-  depth = 0,
-  budget: DerBudget = { remaining: DER_NODE_BUDGET },
-): DerNode => {
-  if (depth > 32) return fail("DER nesting exceeds 32 levels.");
-  if (budget.remaining <= 0)
-    return fail(
-      `DER value count exceeds the ${String(DER_NODE_BUDGET)}-node budget.`,
-    );
-  budget.remaining -= 1;
-  if (offset >= end || offset + 2 > end)
-    return fail("Truncated DER tag or length.");
-  const tag = required(bytes[offset], "Truncated DER tag.");
-  const constructed = (tag & 0x20) !== 0;
-  let cursor = offset + 1;
-  const lengthByte = required(bytes[cursor], "Truncated DER length.");
-  cursor += 1;
-  let length: number;
-  if ((lengthByte & 0x80) === 0) length = lengthByte;
-  else {
-    const width = lengthByte & 0x7f;
-    if (width === 0 || width > 4) return fail("Unsupported DER length form.");
-    if (cursor + width > end) return fail("Truncated DER long length.");
-    length = 0;
-    for (let index = 0; index < width; index += 1) {
-      length = (length << 8) | required(bytes[cursor], "Truncated DER length.");
-      cursor += 1;
-    }
-  }
-  const contentEnd = cursor + length;
-  if (length < 0 || contentEnd > end)
-    return fail("DER value exceeds its parent.");
-  const content = bytes.subarray(cursor, contentEnd);
-  const children: DerNode[] = [];
-  if (constructed) {
-    let at = cursor;
-    while (at < contentEnd) {
-      const child = readDer(bytes, at, contentEnd, depth + 1, budget);
-      children.push(child);
-      at = child.end;
-    }
-  }
-  return {
-    tag,
-    constructed,
-    start: offset,
-    end: contentEnd,
-    content,
-    children,
-  };
+const requireDefiniteEncoding = (node: Asn1Node, label: string): void => {
+  if (node.lengthForm === "indefinite")
+    fail(`${label} must use definite DER length encoding.`);
+  for (const child of node.children) requireDefiniteEncoding(child, label);
 };
 
 export const oidName = (oid: string): string | null => OID_NAMES[oid] ?? null;
@@ -209,7 +164,7 @@ const decodeUtf8 = (bytes: Buffer, budget: DecodedNameBudget): string => {
 };
 
 const decodeDirectoryString = (
-  node: DerNode,
+  node: Asn1Node,
   budget: DecodedNameBudget,
 ): string => {
   switch (node.tag) {
@@ -250,18 +205,18 @@ const requireBitStringContent = (content: Buffer, label: string): void => {
     return fail(`${label} BIT STRING is truncated or has invalid unused bits.`);
 };
 
-const requireBitString = (node: DerNode | undefined, label: string): void => {
+const requireBitString = (node: Asn1Node | undefined, label: string): void => {
   if (node === undefined || node.tag !== 0x03)
     return fail(`${label} is not a BIT STRING.`);
   requireBitStringContent(node.content, label);
 };
 
-const sequence = (node: DerNode, label: string): readonly DerNode[] => {
+const sequence = (node: Asn1Node, label: string): readonly Asn1Node[] => {
   if (node.tag !== 0x30) return fail(`Expected SEQUENCE for ${label}.`);
   return node.children;
 };
 
-const algorithmOid = (node: DerNode): string => {
+const algorithmOid = (node: Asn1Node): string => {
   const children = sequence(node, "AlgorithmIdentifier");
   const oid = children[0];
   if (oid === undefined || oid.tag !== 0x06)
@@ -276,7 +231,7 @@ interface Attribute {
 }
 
 const decodeName = (
-  node: DerNode,
+  node: Asn1Node,
   budget: DecodedNameBudget,
 ): {
   readonly text: string;
@@ -312,7 +267,7 @@ const decodeName = (
   return { text, attributes };
 };
 
-const validityTime = (node: DerNode, budget: DecodedNameBudget): string => {
+const validityTime = (node: Asn1Node, budget: DecodedNameBudget): string => {
   if (node.tag !== 0x17 && node.tag !== 0x18)
     return fail("Validity instant is not UTCTime or GeneralizedTime.");
   // A zero byte becomes "\u0000" (six characters) in the hashed evidence JSON.
@@ -331,7 +286,7 @@ export interface ParsedCertificate {
   readonly signature_algorithm_oid: string;
 }
 
-const requireSubjectPublicKeyInfo = (node: DerNode): void => {
+const requireSubjectPublicKeyInfo = (node: Asn1Node): void => {
   const children = sequence(node, "SubjectPublicKeyInfo");
   const algorithm = children[0];
   const key = children[1];
@@ -346,7 +301,7 @@ const requireSubjectPublicKeyInfo = (node: DerNode): void => {
 // issuerUniqueID [1], subjectUniqueID [2], and extensions [3] are optional
 // and ordered. Anything else is not a TBSCertificate field.
 const finishTbsCertificate = (
-  children: readonly DerNode[],
+  children: readonly Asn1Node[],
   start: number,
 ): void => {
   let cursor = start;
@@ -383,9 +338,10 @@ const finishTbsCertificate = (
 
 /** Decode one X.509 Certificate SEQUENCE at a known file-relative DER node. */
 export const parseCertificate = (
-  node: DerNode,
+  node: Asn1Node,
   names: DecodedNameBudget = { remaining: MAX_DECODED_NAME_BYTES },
 ): ParsedCertificate => {
+  requireDefiniteEncoding(node, "X.509 Certificate");
   const children = sequence(node, "Certificate");
   const tbs = children[0];
   const signatureAlgorithm = children[1];
@@ -467,7 +423,7 @@ export interface ParsedSigner {
 }
 
 const signerIdentifier = (
-  sid: DerNode,
+  sid: Asn1Node,
   names: DecodedNameBudget,
 ): {
   readonly issuer: ReturnType<typeof decodeName> | null;
@@ -505,7 +461,10 @@ const signerIdentifier = (
   );
 };
 
-const parseSigner = (node: DerNode, names: DecodedNameBudget): ParsedSigner => {
+const parseSigner = (
+  node: Asn1Node,
+  names: DecodedNameBudget,
+): ParsedSigner => {
   const children = sequence(node, "SignerInfo");
   const version = children[0];
   const sid = children[1];
@@ -520,7 +479,10 @@ const parseSigner = (node: DerNode, names: DecodedNameBudget): ParsedSigner => {
   );
   let cursor = 3;
   const authenticated = children[cursor]?.tag === 0xa0;
-  if (authenticated) cursor += 1;
+  if (authenticated) {
+    requireDefiniteEncoding(children[cursor]!, "SignerInfo signedAttrs");
+    cursor += 1;
+  }
   const signatureAlg = children[cursor];
   if (signatureAlg === undefined)
     return fail("SignerInfo is missing signatureAlgorithm.");
@@ -551,7 +513,7 @@ export interface ParsedSignedData {
 }
 
 const parseSignedData = (
-  node: DerNode,
+  node: Asn1Node,
   names: DecodedNameBudget,
 ): ParsedSignedData => {
   const children = sequence(node, "SignedData");
@@ -597,7 +559,8 @@ const parseSignedData = (
 
 /** Decode ContentInfo wrapping SignedData; other content types remain unsupported. */
 export const parsePkcs7SignedData = (bytes: Buffer): ParsedSignedData => {
-  const root = readDer(bytes);
+  const root = readAsn1(bytes);
+  if (root.end !== bytes.length) return fail("ContentInfo has trailing data.");
   const children = sequence(root, "ContentInfo");
   const type = children[0];
   const content = children[1];

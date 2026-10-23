@@ -36,6 +36,7 @@ export const elfFixture = (
     { name: ".shstrtab", type: 3, bytes: names },
     ...sections,
   ];
+  const extendedSectionCount = rows.length >= 0xff00;
   let position = 64;
   const entries = rows.map((row) => {
     position = Math.ceil(position / 8) * 8;
@@ -62,8 +63,10 @@ export const elfFixture = (
   result.writeUInt32LE(machine === 190 ? 0x500550 : 0x12c, 48);
   result.writeUInt16LE(64, 52);
   result.writeUInt16LE(64, 58);
-  result.writeUInt16LE(rows.length, 60);
+  result.writeUInt16LE(extendedSectionCount ? 0 : rows.length, 60);
   result.writeUInt16LE(1, 62);
+  if (extendedSectionCount)
+    result.writeBigUInt64LE(BigInt(rows.length), table + 32);
   for (let index = 1; index < entries.length; index++) {
     const { row, offset } = entries[index]!,
       h = table + index * 64;
@@ -90,6 +93,8 @@ export const cubinFixture = (
     architecture?: number;
     osAbi?: number;
     flags?: number;
+    extendedSectionIndex?: boolean;
+    v2ParameterSize?: number;
   } = {},
 ): Buffer => {
   const name = options.name ?? "add_one";
@@ -97,22 +102,45 @@ export const cubinFixture = (
   symbols.writeUInt32LE(1, 24);
   symbols[28] = 0x12;
   symbols[29] = 0x10;
-  symbols.writeUInt16LE(4, 30);
+  symbols.writeUInt16LE(options.extendedSectionIndex ? 0xffff : 4, 30);
   symbols.writeBigUInt64LE(16n, 40);
   const record = Buffer.from("042f0800010000000a000000", "hex");
   record.writeUInt32LE(options.globalRegisters ?? 10, 8);
   const global = Buffer.alloc(record.length * (options.globalRecords ?? 1));
   for (let offset = 0; offset < global.length; offset += record.length)
     record.copy(global, offset);
-  const info = Buffer.from(
-    "03190c0004170c00000000000100080000f0110004170c00000000000000000000f02100",
-    "hex",
-  );
+  const info =
+    options.v2ParameterSize === undefined
+      ? Buffer.from(
+          "03190c0004170c00000000000100080000f0110004170c00000000000000000000f02100",
+          "hex",
+        )
+      : (() => {
+          const byteCount = Buffer.alloc(4);
+          byteCount[0] = 3;
+          byteCount[1] = 0x19;
+          byteCount.writeUInt16LE(options.v2ParameterSize!, 2);
+          const v2 = Buffer.alloc(16);
+          v2[0] = 4;
+          v2[1] = 0x45;
+          v2.writeUInt16LE(12, 2);
+          v2.writeUInt32LE(options.v2ParameterSize!, 12);
+          return Buffer.concat([byteCount, v2]);
+        })();
+  const paddingSections = options.extendedSectionIndex
+    ? Array.from({ length: 65531 }, (_, index) => ({
+        name: `.padding.${index}`,
+      }))
+    : [];
+  const textSectionIndex = options.extendedSectionIndex ? 65535 : 4;
+  const extendedIndices = Buffer.alloc(8);
+  extendedIndices.writeUInt32LE(textSectionIndex, 4);
   const result = elfFixture(
     190,
     [
       { name: ".strtab", type: 3, bytes: Buffer.from(`\0${name}\0`) },
       { name: ".symtab", type: 2, link: 2, entrySize: 24, bytes: symbols },
+      ...paddingSections,
       {
         name: `.text.${name}`,
         flags: 0x100006n,
@@ -124,15 +152,26 @@ export const cubinFixture = (
         name: `.nv.info.${name}`,
         type: 0x70000000,
         link: 3,
-        info: 4,
+        info: textSectionIndex,
         bytes: info,
       },
       {
         name: `.nv.shared.${name}`,
         type: 8,
-        info: 4,
+        info: textSectionIndex,
         size: options.shared ?? 1056,
       },
+      ...(options.extendedSectionIndex
+        ? [
+            {
+              name: ".symtab_shndx",
+              type: 18,
+              link: 3,
+              entrySize: 4,
+              bytes: extendedIndices,
+            },
+          ]
+        : []),
       ...Array.from({ length: (options.globalAliases ?? 1) - 1 }, () => ({
         name: ".nv.info",
         type: 0x70000000,
@@ -148,12 +187,21 @@ export const cubinFixture = (
       48,
     );
   const table = Number(result.readBigUInt64LE(40));
+  const sectionCount =
+    result.readUInt16LE(60) === 0
+      ? Number(result.readBigUInt64LE(table + 32))
+      : result.readUInt16LE(60);
   if (options.osAbi !== undefined) {
     result[7] = options.osAbi;
     result.writeUInt32LE(1, 20);
   }
   if (options.flags !== undefined) result.writeUInt32LE(options.flags, 48);
-  for (let index = 8; index < result.readUInt16LE(60); index++) {
+  for (
+    let index =
+      8 + paddingSections.length + (options.extendedSectionIndex ? 1 : 0);
+    index < sectionCount;
+    index++
+  ) {
     result.writeBigUInt64LE(
       result.readBigUInt64LE(table + 5 * 64 + 24),
       table + index * 64 + 24,
@@ -162,7 +210,11 @@ export const cubinFixture = (
   }
   return result;
 };
-export const amdFixture = (hidden = false, trailingNote?: Buffer): Buffer => {
+export const amdFixture = (
+  hidden = false,
+  trailingNote?: Buffer,
+  target = "amdgcn-amd-amdhsa--gfx900",
+): Buffer => {
   const args = [
     { ".offset": 0, ".size": 8, ".value_kind": "global_buffer" },
     {
@@ -173,7 +225,7 @@ export const amdFixture = (hidden = false, trailingNote?: Buffer): Buffer => {
   ];
   const metadata = Buffer.from(
     encode({
-      "amdhsa.target": "amdgcn-amd-amdhsa--gfx900",
+      "amdhsa.target": target,
       "amdhsa.version": [1, 1],
       "amdhsa.kernels": [
         {
@@ -206,12 +258,12 @@ export const amdFixture = (hidden = false, trailingNote?: Buffer): Buffer => {
 };
 export const cudaFixture = (
   compression: "none" | "zstd" = "none",
-  entries = [
+  entries: { kind: number; target: number; bytes: Buffer; flags?: number }[] = [
     { kind: 1, target: 80, bytes: Buffer.from(ptxFixture) },
     { kind: 2, target: 90, bytes: cubinFixture({ architecture: 90 }) },
   ],
 ): Buffer => {
-  const records = entries.map(({ kind, target, bytes }) => {
+  const records = entries.map(({ kind, target, bytes, flags: entryFlags }) => {
     const compressed = compression === "zstd",
       data = compressed ? zstdCompressSync(bytes) : bytes;
     const result = Buffer.alloc(64 + Math.ceil(data.length / 8) * 8);
@@ -221,7 +273,10 @@ export const cudaFixture = (
     result.writeBigUInt64LE(BigInt(result.length - 64), 8);
     result.writeUInt32LE(compressed ? data.length : 0, 16);
     result.writeUInt32LE(target, 28);
-    result.writeBigUInt64LE(compressed ? 0x8011n : 0x11n, 40);
+    result.writeBigUInt64LE(
+      (compressed ? 0x8011n : 0x11n) | BigInt(entryFlags ?? 0),
+      40,
+    );
     result.writeBigUInt64LE(compressed ? BigInt(bytes.length) : 0n, 56);
     data.copy(result, 64);
     return result;

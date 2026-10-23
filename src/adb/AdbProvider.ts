@@ -77,10 +77,13 @@ import {
   runtimeControlCapabilityError,
 } from "../process/RuntimeControlUnavailableError.js";
 import {
+  adbCommandCapturedOutput,
+  adbCommandOutputFailure,
   adbArguments,
   runAdb,
   runAdbCapture,
   packageChangeRefusal,
+  probeAdbPathDirectory,
   probeAdbPathExistence,
   type AdbRunLimits,
 } from "./AdbCommand.js";
@@ -2422,10 +2425,22 @@ export class AdbProvider {
           operation,
           signal,
         );
-        const existsProbe = await probeAdbPathExistence(
+        const directoryProbe = await probeAdbPathDirectory(
           operation,
           input.serial,
           input.device_path,
+          selection.binary,
+          { timeoutMs: SETTINGS_TIMEOUT_MS, maxOutputBytes: 1024 },
+          signal,
+        );
+        if (!directoryProbe.ok) return directoryProbe;
+        const devicePath = directoryProbe.value
+          ? `${input.device_path}${input.device_path.endsWith("/") ? "" : "/"}${basename(localPath)}`
+          : input.device_path;
+        const existsProbe = await probeAdbPathExistence(
+          operation,
+          input.serial,
+          devicePath,
           selection.binary,
           { timeoutMs: SETTINGS_TIMEOUT_MS, maxOutputBytes: 1024 },
           signal,
@@ -2436,7 +2451,7 @@ export class AdbProvider {
           return err(
             new AnalysisOutputError(
               operation,
-              `The device path already exists and overwrite was not requested: ${input.device_path}`,
+              `The device path already exists and overwrite was not requested: ${devicePath}`,
             ),
           );
         const pushed = await runAdb(
@@ -2466,7 +2481,7 @@ export class AdbProvider {
               client,
               serial: input.serial,
               local_path: localPath,
-              device_path: input.device_path,
+              device_path: devicePath,
               bytes: digest.bytes,
               sha256: digest.sha256,
               device_sha256: deviceDigest.device_sha256,
@@ -2486,9 +2501,9 @@ export class AdbProvider {
           );
         const deviceDigest = await runAdb(
           operation,
-          { device: input.serial, path: input.device_path },
+          { device: input.serial, path: devicePath },
           selection.binary,
-          adbArguments(input.serial, ["shell", "sha256sum", input.device_path]),
+          adbArguments(input.serial, ["shell", "sha256sum", devicePath]),
           { timeoutMs: SHELL_TIMEOUT_MS, maxOutputBytes: 1024 },
           signal,
         );
@@ -2545,7 +2560,7 @@ export class AdbProvider {
           return err(
             new AnalysisArtifactChangedError(
               operation,
-              input.device_path,
+              devicePath,
               `The device-reported digest does not match the staged local file: ${localPath}`,
               {
                 partialObservation: createEvidence(
@@ -2848,11 +2863,37 @@ export class AdbProvider {
       { timeoutMs: SHELL_TIMEOUT_MS, maxOutputBytes: PM_PATH_MAX_OUTPUT_BYTES },
       signal,
     );
-    if (!started.ok) return started;
-    const verdict = parseAmStartOutput(
-      started.value.stdout,
-      started.value.stderr,
-    );
+    let stdout: string;
+    let stderr: string;
+    let capturedOutput: ReturnType<typeof adbCommandCapturedOutput>;
+    let verdict: ReturnType<typeof parseAmStartOutput>;
+    if (started.ok) {
+      stdout = started.value.stdout;
+      stderr = started.value.stderr;
+      capturedOutput = { stdout, stderr, truncated: false };
+      verdict = parseAmStartOutput(stdout, stderr);
+    } else {
+      const commandFailure = adbCommandOutputFailure(started.error);
+      // AOSP ActivityManagerShellCommand returns 1 for class-not-found and
+      // emits its refusal report on stdout. Other exits remain command errors.
+      if (
+        commandFailure === undefined ||
+        commandFailure.code !== 1 ||
+        commandFailure.signal !== null ||
+        commandFailure.killed ||
+        commandFailure.outputTruncated ||
+        commandFailure.collectionFailure === true
+      )
+        return started;
+      stdout = commandFailure.stdout;
+      stderr = commandFailure.stderr;
+      capturedOutput = adbCommandCapturedOutput(commandFailure);
+      // Stderr carries adb transport diagnostics, not the Activity Manager
+      // report, so it cannot establish a target refusal on this path.
+      verdict = parseAmStartOutput(stdout);
+      if (verdict.status !== "refused" || verdict.startedActivity === null)
+        return started;
+    }
     const result = {
       ...resultFields,
       started_activity: verdict.startedActivity,
@@ -2877,22 +2918,15 @@ export class AdbProvider {
           operation,
           serial,
           verdict.reason ?? "am start refused the intent",
-          {
-            capturedOutput: {
-              stdout: started.value.stdout,
-              stderr: started.value.stderr,
-              truncated: false,
-            },
-            partialObservation,
-          },
+          { capturedOutput, partialObservation },
         ),
       );
     }
     return ok(
       createAnalysisExecution(result, provider, {
         rawResult: {
-          stdout: started.value.stdout,
-          stderr: started.value.stderr,
+          stdout,
+          stderr,
         },
         limitations: [
           "Starting an activity changes device state; am start -W waits for launch completion but no lifecycle observation is captured",

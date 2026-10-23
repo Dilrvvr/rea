@@ -321,25 +321,38 @@ The complete Evidence identifies the stable artifact snapshot by path, byte
 count and SHA-256.
 
 - PE rows reproduce the export directory: each used export-address-table slot
-  with its `ordinal`, one row per name (aliases share an ordinal), `address`
+  with its biased `ordinal` (`OrdinalBase` plus the slot index), one row per
+  name (aliases share an ordinal), `address`
   as the preferred-base virtual address, or `forwarder` text when the slot
-  forwards to another DLL. Ordinal-only exports have a null `name`. The
+  forwards to another DLL. Unused zero-address slots are omitted;
+  ordinal-only exports have a null `name`. The name-ordinal table stores an
+  unbiased 16-bit EAT index; reported biased ordinals may exceed 16 bits. The
   directory's DLL name, ordinal base and timestamp are reported, and an image
   without an export directory is a complete empty inventory.
 - ELF rows list defined `.dynsym` symbols with global, weak or GNU-unique
   binding and default or protected visibility. Each row keeps `value`
   (`st_value` as stored; bit 0 marks Thumb code on 32-bit ARM), `size`, `type`
-  and `binding`. `version` is null for an unversioned symbol, the
-  `.gnu.version_d` index, name and `hidden` flag for a versioned one, or
-  `"unknown"` when the version table cannot be read. A hidden version is not
+  and `binding`. ELF string tables do not declare a text encoding. Names that
+  contain non-ASCII bytes are decoded as UTF-8 when those bytes form valid
+  UTF-8; `name_utf8_decodable` records whether the non-ASCII name bytes are
+  valid UTF-8 and `name_bytes_base64` retains those exact bytes (`null` for
+  ASCII names). When they are not valid UTF-8, `name` uses a byte-preserving
+  Latin-1 mapping and the raw bytes remain available. Older retained results
+  report null for the newly added encoding fields. `version` is null for an
+  unversioned symbol. A versioned
+  symbol reports its GNU index, a name resolved from `.gnu.version_d` or
+  `.gnu.version_r`, and the `hidden` flag from `.gnu.version`. `"unknown"`
+  means the symbol-version table could not be read. A hidden version is not
   the default version that a by-name `dlsym` lookup selects.
+  Definition names take precedence when both tables name the same index.
 
 Unreadable names, out-of-range name ordinals and unreadable forwarders are
 listed in `issues`, their entries are not reported, and coverage is `partial`.
-Unresolved symbol versions keep their rows: the version name is null for an
-index no definition names, and `version` is `"unknown"` when the version table
-cannot be read; coverage is likewise `partial`. A dynamic symbol table without
-its null entry is malformed. An ELF without section headers is `unsupported`:
+Unresolved symbol versions keep their rows: the version name is null when no
+definition or requirement names the index, and `version` is
+`"unknown"` when the version table cannot be read; coverage is likewise
+`partial`. A dynamic symbol table without its null entry is malformed. An ELF
+without section headers is `unsupported`:
 enumerating dynamic symbols from the dynamic segment is not
 implemented. Mach-O exports are reported by `inspect_macho`.
 

@@ -386,6 +386,13 @@ constants, and bounded shape context. It reports all candidates at the winning
 score and remains ambiguous when the evidence does not distinguish them. The
 digest does not itself remap metadata tokens.
 
+Matched methods also compare aligned call sites. `call-shape` reports opcode and
+operand-kind differences; `call-target` reports differences in the observed
+target declaring-type or method name from `call_edges`. Target tokens remain
+build-local and are not compared across artifacts. Missing or unaligned call
+edges and missing target names leave that facet unknown; equal names do not
+establish overload identity or runtime dispatch.
+
 Tokens are always remapped through observed structure. A caller cannot carry
 `0x06001234` into a new MVID and assume it names the same method.
 
@@ -436,7 +443,10 @@ point identities with supplied native export or function evidence. Name/module
 matches establish declaration links; they do not establish that a call executed.
 When either side lacks a usable module identity, a matching name remains
 unresolved and retains the candidate evidence; REA reports a module mismatch
-only when both identities are available and differ.
+only when both identities are available and their format-specific comparison
+establishes a difference. ELF module names retain case, PE module names compare
+case-insensitively, and a case-only match for Mach-O or an unknown format stays
+unresolved because the available Evidence does not establish case behavior.
 
 Metadata tokens are not native addresses. Native body mapping for C++/CLI,
 ReadyToRun, NativeAOT, and IL2CPP requires separately verified format and provider
@@ -519,6 +529,19 @@ CLI `#GUID` heap values retain their exact 16-byte GUID text. REA does not impos
 RFC 4122 UUID version or variant bits on MVID, EncId, or EncBaseId because
 ECMA-335 metadata does not require those bit patterns. Tokens and RVAs are
 build-local coordinates, not durable cross-build identities or native addresses.
+Field and method signatures validate embedded TypeDefOrRefOrSpec operands
+against the artifact's metadata tables. An invalid operand leaves the member
+name and raw signature digest available while marking that signature malformed
+and coverage partial.
+A fat method header's nonzero LocalVarSigTok must name an existing StandAloneSig
+row whose blob is a structurally valid LocalVarSig. REA validates its local
+types and exact blob coverage but does not project their identities. An invalid
+token or malformed signature leaves decoded CIL anchors intact but marks the
+body malformed and coverage partial. Unsupported local type encodings retain
+the readable body with partial coverage. Zero continues to mean no locals
+signature. Comparison detects whether a locals declaration is present, but raw
+table tokens are not cross-build identities and local type contents are not
+compared.
 
 ## Decoded-CIL fingerprint
 
@@ -544,6 +567,10 @@ Tuple operands use these exact projections:
 - signed integer and variable operands: decimal strings; floating-point
   operands: JavaScript's `String` representation of the decoded IEEE value.
 
+For `ldtoken` MemberRef operands, `operand_kind` follows the parsed member
+signature (`field` or `method`); if that signature does not establish the kind,
+the anchor keeps the generic `token` classification.
+
 Opcode names retain short/long forms and prefix opcodes. This makes the value a
 reproducible decoded-tuple fingerprint, not a canonical semantic CIL identity:
 it does not resolve tokens across MVIDs, does not commit full control flow or
@@ -551,7 +578,8 @@ exception semantics, and does not replace the raw CIL digest. Cross-build
 comparison requires equal raw CIL digests as well for exact CIL/signature
 matches and reports ambiguity when structural evidence is insufficient.
 
-For example, a decoded `nop; ret` body serializes exactly as
+For example, a present body (including any valid declared locals signature)
+whose IL is `nop; ret` serializes exactly as
 `[["nop","none",null],["ret","none",null]]` and has digest
 `5e5fad7741cb44bca3a4f045546b7449990da343f612f5f34c0ca30e9eee0636`.
 This vector specifies the tuple order, `null` handling, absence of whitespace,
@@ -712,6 +740,10 @@ Managed member comparisons report a `metadata` dimension when an observed
 MethodDef flags or implementation flags value differs, including accessibility
 or synchronization changes. Observed method-body `init_locals` and `max_stack`
 differences also contribute to `metadata`, even when CIL decoding is incomplete.
+For complete bodies, presence or absence of a locals signature also contributes;
+the locals table token is build-local and is not compared. Local type contents
+are not currently compared, so this facet does not establish equivalent locals
+declarations.
 An unavailable header value keeps body coverage unknown rather than establishing
 equality or a difference. These comparisons are separate from the CIL/signature
 matching tiers: identical instructions do not establish unchanged method metadata.

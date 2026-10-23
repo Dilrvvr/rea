@@ -115,16 +115,45 @@ describe("PE export directories", () => {
     expect(result.limitations[0]).toContain("declares no export directory");
   });
 
-  it("refuses ordinals beyond the 16-bit ordinal space", () => {
-    expect(() =>
-      parseNativeExports(
+  it("preserves biased ordinals beyond WORD and DWORD", () => {
+    const cases = [
+      { ordinalBase: 0x10000, index: 0, ordinal: 0x10000 },
+      { ordinalBase: 0xffffffff, index: 0, ordinal: 0xffffffff },
+      {
+        ordinalBase: 0xffffffff,
+        index: 1,
+        ordinal: 0x1_0000_0000,
+      },
+    ];
+
+    for (const { ordinalBase, index, ordinal } of cases) {
+      const result = parse(
         peExportImage({
-          functions: [{ rva: 0x2000 }],
-          ordinalBase: 0xffff + 1,
+          ordinalBase,
+          functions: Array.from({ length: index + 1 }, (_, row) =>
+            row === index ? { rva: 0x2000 } : null,
+          ),
+          names: [{ name: "Named", index }],
         }),
-        artifact,
-      ),
-    ).toThrow("16-bit ordinals");
+      );
+      expect(result.exports).toMatchObject([{ name: "Named", ordinal }]);
+    }
+  });
+
+  it("ignores a trailing unused slot after the last 16-bit ordinal", () => {
+    const result = parse(
+      peExportImage({
+        ordinalBase: 0xffff,
+        functions: [{ rva: 0x2000 }, null],
+        names: [{ name: "Kept", index: 0 }],
+      }),
+    );
+
+    expect(result).toMatchObject({
+      coverage: { status: "complete", examined_entries: 2, exports: 1 },
+      issues: [],
+      exports: [{ name: "Kept", ordinal: 0xffff }],
+    });
   });
 
   it("refuses an export table above the inventory allowance", () => {
@@ -282,6 +311,137 @@ describe("ELF dynamic symbol exports", () => {
   });
 });
 
+describe("ELF version requirements", () => {
+  it("resolves defined copy-relocated symbols through version requirements", () => {
+    const result = parse(
+      elfExportImage({
+        symbols: [
+          { name: "stdout", type: 1, value: 0x28268n, version: 3 },
+          { name: "stderr", type: 1, value: 0x282a0n, version: 0x8003 },
+        ],
+        versionRequirements: [{ index: 3, name: "GLIBC_2.2.5" }],
+      }),
+    );
+
+    expect(result).toMatchObject({
+      coverage: { status: "complete", exports: 2 },
+      issues: [],
+      exports: [
+        {
+          name: "stdout",
+          value: "0x28268",
+          version: { index: 3, name: "GLIBC_2.2.5", hidden: false },
+        },
+        {
+          name: "stderr",
+          value: "0x282a0",
+          version: { index: 3, name: "GLIBC_2.2.5", hidden: true },
+        },
+      ],
+    });
+  });
+
+  it("keeps version definitions and requirements in the same symbol lookup", () => {
+    const result = parse(
+      elfExportImage({
+        symbols: [
+          { name: "defined_version", version: 2 },
+          { name: "required_version", version: 4 },
+        ],
+        versionDefinitions: ["libfixture.so", "FIXTURE_1"],
+        versionRequirements: [
+          { index: 3, name: "GLIBC_2.2.5" },
+          { index: 4, name: "GLIBC_2.3" },
+        ],
+      }),
+    );
+
+    expect(result).toMatchObject({
+      coverage: { status: "complete", exports: 2 },
+      issues: [],
+      exports: [
+        { name: "defined_version", version: { index: 2, name: "FIXTURE_1" } },
+        {
+          name: "required_version",
+          version: { index: 4, name: "GLIBC_2.3" },
+        },
+      ],
+    });
+  });
+
+  it("uses a definition name when a requirement shares its index", () => {
+    const result = parse(
+      elfExportImage({
+        symbols: [{ name: "ambiguous", version: 2 }],
+        versionDefinitions: ["libfixture.so", "DEFINITION"],
+        versionRequirements: [{ index: 2, name: "REQUIREMENT" }],
+      }),
+    );
+
+    expect(result.exports).toMatchObject([
+      {
+        name: "ambiguous",
+        version: { index: 2, name: "DEFINITION", hidden: false },
+      },
+    ]);
+    expect(result.coverage.status).toBe("complete");
+    expect(result.issues).toEqual([]);
+  });
+
+  it("retains exports and reports a truncated version-requirement chain", () => {
+    const result = parse(
+      elfExportImage({
+        symbols: [{ name: "stdout", type: 1, version: 3 }],
+        versionRequirements: [{ index: 3, name: "GLIBC_2.2.5" }],
+        truncatedVersionRequirements: true,
+      }),
+    );
+
+    expect(result.exports).toMatchObject([
+      { name: "stdout", version: { index: 3, name: null, hidden: false } },
+    ]);
+    expect(result.coverage.status).toBe("partial");
+    expect(result.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "version_unresolved",
+          message: expect.stringContaining(
+            "auxiliary chain leaves its section",
+          ),
+        }),
+      ]),
+    );
+  });
+
+  it("marks a definition chain that ends before its declared count", () => {
+    const result = parse(
+      elfExportImage({
+        symbols: [{ name: "defined_version", version: 2 }],
+        versionDefinitions: ["libfixture.so", "FIXTURE_1"],
+        truncatedVersionDefinitions: true,
+      }),
+    );
+
+    expect(result.exports).toMatchObject([
+      {
+        name: "defined_version",
+        version: { index: 2, name: null, hidden: false },
+      },
+    ]);
+    expect(result.coverage.status).toBe("partial");
+    expect(result.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "version_unresolved",
+          message: expect.stringContaining(
+            "chain ends before its declared count",
+          ),
+        }),
+      ]),
+    );
+  });
+});
+
 describe("export inventory review regressions", () => {
   it("reads an export directory stored in the PE headers", () => {
     const result = parse(
@@ -355,6 +515,30 @@ describe("export inventory review regressions", () => {
         artifact,
       ),
     ).toThrow(BinaryFormatFailure);
+  });
+});
+
+describe("ELF symbol-name text", () => {
+  it("decodes UTF-8 names and retains exact bytes", () => {
+    const result = parse(elfExportImage({ symbols: [{ name: "cafÃ©" }] }));
+    expect(result.format).toBe("elf");
+    if (result.format !== "elf") throw new TypeError("expected ELF result");
+    expect(result.exports[0]).toMatchObject({
+      name: "café",
+      name_bytes_base64: "Y2Fmw6k=",
+      name_utf8_decodable: true,
+    });
+  });
+
+  it("retains invalid UTF-8 bytes without replacement", () => {
+    const result = parse(elfExportImage({ symbols: [{ name: "\u00ff" }] }));
+    expect(result.format).toBe("elf");
+    if (result.format !== "elf") throw new TypeError("expected ELF result");
+    expect(result.exports[0]).toMatchObject({
+      name: "ÿ",
+      name_bytes_base64: "/w==",
+      name_utf8_decodable: false,
+    });
   });
 });
 

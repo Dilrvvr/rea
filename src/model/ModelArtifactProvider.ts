@@ -3,7 +3,7 @@ import type { ModelArtifactPort } from "../application/model/ModelArtifactPort.j
 import {
   createModelArtifactEvidence,
   createModelArtifactPartialEvidence,
-} from "../application/model/ModelArtifactEvidence.js";
+} from "../domain/model/modelArtifactEvidence.js";
 import type { ExecutionOptions } from "../application/AnalysisProvider.js";
 import type {
   ModelArtifact,
@@ -322,6 +322,9 @@ export class ModelArtifactProvider implements ModelArtifactPort {
               partial.coverage.metadata = "partial";
             },
             onMetadata: (row) => partial?.metadata.push(row),
+            onAlignment: (alignment) => {
+              if (partial !== undefined) partial.alignment = alignment;
+            },
             onMetadataComplete: () => {
               if (partial !== undefined) partial.coverage.metadata = "complete";
             },

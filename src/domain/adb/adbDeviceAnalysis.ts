@@ -319,7 +319,7 @@ export const adbInputSchemas = {
       .min(1)
       .max(512)
       .regex(
-        /^[A-Za-z0-9._\x2d]+(\/[A-Za-z0-9._\x2d]*)?$/u,
+        /^[A-Za-z0-9._\x2d]+(?:\/[A-Za-z0-9._$\x2d]*)?$/u,
         "Component must be package/activity form",
       )
       .optional()
@@ -527,7 +527,7 @@ export const adbResultSchemas = {
     client,
     serial: z.string().min(1),
     properties: z.array(
-      z.strictObject({ name: z.string().min(1), value: z.string().min(1) }),
+      z.strictObject({ name: z.string().min(1), value: z.string() }),
     ),
     property_count: z.int().nonnegative(),
     emulator_observed: z.boolean().nullable(),

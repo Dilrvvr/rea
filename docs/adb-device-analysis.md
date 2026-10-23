@@ -90,7 +90,7 @@ existing analysis families directly, for example
 | `read_adb_logcat`       | read               | Bounded `logcat -d -t` dump for one buffer, optional pid filter                                                                                                                                                                       |
 | `list_adb_packages`     | read               | `pm list packages -f` with scope; base APK device paths                                                                                                                                                                               |
 | `resolve_adb_packages`  | read               | Case-insensitive package-name substring search with exact-match flag                                                                                                                                                                  |
-| `inspect_adb_package`   | read               | `dumpsys package` projection: versions, install times, installer, flags, permission count                                                                                                                                             |
+| `inspect_adb_package`   | read               | `dumpsys package` projection: versions, install times, installer, flags, and count of listed requested-permission rows (including Unicode names)                                                                                      |
 | `list_adb_directory`    | read               | NUL-framed immediate children, including hidden entries: kinds, permissions, owner, group, sizes, symlink targets                                                                                                                     |
 | `pull_adb_package`      | read               | Complete split APK set from `pm path`, each file digested                                                                                                                                                                             |
 | `pull_adb_file`         | read               | One absolute device path pulled and digested                                                                                                                                                                                          |
@@ -102,6 +102,11 @@ existing analysis families directly, for example
 | `start_adb_app`         | **mutates device** | Resolves the package's launcher activity (`cmd package resolve-activity --brief`) and starts it (`am start -n`)                                                                                                                       |
 | `start_adb_activity`    | **mutates device** | Starts an intent (`am start -a` with optional URI, component, and up to 16 typed extras); preserves the activity manager's verdict                                                                                                    |
 | `stop_adb_app`          | **mutates device** | Force-stops every process of a package, ending a dynamic-analysis run                                                                                                                                                                 |
+
+When `push_adb_file` receives an existing directory, adb places the local file
+inside it under the local basename; Evidence reports that effective file path
+while retaining the caller's directory path in the input parameters. The
+private read-only staging copy preserves the source file's executable bits.
 
 For `inspect_adb_window`, `focus_contexts` retains each display header, its exact
 display ID when recognized, and every focus declaration with its original line.
@@ -136,8 +141,10 @@ and during shutdown.
   labelled hex in `unparsed_lines` and make directory coverage partial.
 - **Inferences carry their basis.** Device `kind` reports
   `kind_basis` (serial prefix or USB transport); APK `role` reports
-  `role_basis: file_name`; `emulator_observed` is the build's own
-  `ro.kernel.qemu` value, `null` when absent.
+  `role_basis: file_name`; `emulator_observed` is derived from the build's
+  `ro.kernel.qemu` property: `true` only when its value is `"1"`, `false` for
+  any other reported value, and `null` when the property is absent. The raw
+  property value remains available in `properties`.
 - **Device paths are not host paths.** `base_apk_device_path` values live on
   the device filesystem. Only pulls and captures produce host-local paths,
   each paired with byte size and SHA-256 digest. A pulled file's host name is

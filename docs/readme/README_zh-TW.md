@@ -1,7 +1,7 @@
 <div align="center">
 
 [English](../../README.md) · [简体中文](README_zh.md) · **繁體中文** · [日本語](README_ja.md) · [한국어](README_ko.md) · [Türkçe](README_tr.md) · [Русский](README_ru.md) · [Tiếng Việt](README_vi.md) · [ไทย](README_th.md) · [Deutsch](README_de.md) · [Español](README_es.md) · [Français](README_fr.md) · [Українська](README_uk.md) · [Polski](README_pl.md) · [Português (Brasil)](README_pt-BR.md) · [العربية](README_ar.md) · [فارسی](README_fa.md) · [Bahasa Indonesia](README_id.md) · [Italiano](README_it.md)
-· [Ελληνικά](README_el.md) · [മലയാളം](README_ml.md)
+· [Ελληνικά](README_el.md) · [മലയാളം](README_ml.md) · [Roman Urdu](README_ur-Latn.md)
 
 # REA：逆向一切
 
@@ -139,7 +139,7 @@ AI 代理通過 MCP 呼叫 REA，檢查目標並追蹤相關程式碼。REA 返�
 
 ## 可以分析什麼
 
-REA 需要 Node.js 22.x（>=22.19）、24.x（>=24.11）或 26+，以及 npm。額外工具和主機支援取決於分析目標：
+REA 需要 Node.js 22.x（>=22.23.4）、24.x（>=24.22.1）或 26+ (>=26.12.1)，以及 npm。額外工具和主機支援取決於分析目標：
 
 | 目標                  | REA 返回的內容                                                               | 要求與指南                                                                                                         |
 | --------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |

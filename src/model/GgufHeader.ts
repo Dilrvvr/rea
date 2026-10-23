@@ -42,6 +42,7 @@ export interface GgufProgress {
     declared_tensor_count: number;
   }): void;
   onMetadata(row: ModelMetadata): void;
+  onAlignment(alignment: number): void;
   onMetadataComplete(): void;
   onTensorsStarted(): void;
   onTensorDeclaration(row: ModelArtifactPartialTensor): void;
@@ -318,10 +319,12 @@ export class GgufHeader {
             "GGUF general.alignment must be a positive UINT32 multiple of eight",
           );
         alignment = parsed.value;
+        progress?.onAlignment(alignment);
       }
       metadata.push(row);
       progress?.onMetadata(row);
     }
+    if (!keys.has("general.alignment")) progress?.onAlignment(alignment);
     progress?.onMetadataComplete();
     progress?.onTensorsStarted();
     const tensors: ModelArtifactPartialTensor[] = [];
@@ -381,9 +384,9 @@ export class GgufHeader {
       progress?.onTensorDeclaration(tensor);
     }
     const tensor_data_offset =
-      tensorCount === 0
-        ? this.reader.position
-        : Math.ceil(this.reader.position / alignment) * alignment;
+      Math.ceil(this.reader.position / alignment) * alignment;
+    if (tensor_data_offset > this.reader.size)
+      rejectModel("GGUF tensor data section begins outside the file");
     for (const tensor of tensors) {
       const offset = BigInt(tensor_data_offset) + BigInt(tensor.data_offset);
       if (

@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { readFile, readdir, writeFile } from "node:fs/promises";
+import { readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -23,6 +24,7 @@ const onefile = async (
   magic = PYTHON_39_MAGIC,
   marker = false,
   compressPyz = false,
+  pyzToc?: Buffer,
 ): Promise<string> => {
   const directory = await createTestTempDirectory("rea-pyinstaller-cli-");
   const path = join(directory, "hello");
@@ -63,6 +65,12 @@ const onefile = async (
           compress: true,
         },
         {
+          name: "healthy.txt",
+          typeCode: "x",
+          payload: Buffer.from("healthy sibling"),
+          compress: false,
+        },
+        {
           name: "PYZ.pyz",
           typeCode: "z",
           payload: pyzArchive({
@@ -70,8 +78,77 @@ const onefile = async (
             modules: [
               { name: "app", typeCode: 0, body: Buffer.from("app-body") },
             ],
+            ...(pyzToc === undefined ? {} : { toc: pyzToc }),
           }),
           compress: compressPyz,
+        },
+      ],
+    }),
+  );
+  return path;
+};
+
+const int32 = (value: number): Buffer => {
+  const bytes = Buffer.alloc(4);
+  bytes.writeInt32LE(value);
+  return bytes;
+};
+
+const marshalInt = (value: number): Buffer =>
+  Buffer.concat([Buffer.from([0x69]), int32(value)]);
+
+const marshalLong = (digits: readonly number[]): Buffer =>
+  Buffer.concat([
+    Buffer.from([0x6c]),
+    int32(digits.length),
+    ...digits.map((digit) => {
+      const bytes = Buffer.alloc(2);
+      bytes.writeUInt16LE(digit);
+      return bytes;
+    }),
+  ]);
+
+const namespaceToc = (typeCode: Buffer): Buffer =>
+  Buffer.concat([
+    Buffer.from([0x5b]),
+    int32(1),
+    Buffer.from([0x29, 2, 0x7a, 3]),
+    Buffer.from("pkg"),
+    Buffer.from([0x29, 3]),
+    typeCode,
+    marshalInt(12),
+    marshalInt(0),
+  ]);
+
+const namespacePathCollision = async (): Promise<string> => {
+  const directory = await createTestTempDirectory("rea-pyinstaller-namespace-");
+  const path = join(directory, "collision");
+  await writeFile(
+    path,
+    cArchiveExecutable({
+      layout: "2.1",
+      pythonVersion: 309,
+      members: [
+        {
+          name: "PYZ.pyz",
+          typeCode: "z",
+          payload: pyzArchive({
+            magic: PYTHON_39_MAGIC,
+            modules: [{ name: "ns", typeCode: 3, body: Buffer.alloc(0) }],
+          }),
+          compress: false,
+        },
+        {
+          name: "PYZ.pyz/ns",
+          typeCode: "x",
+          payload: Buffer.from("outer data"),
+          compress: false,
+        },
+        {
+          name: "healthy.txt",
+          typeCode: "x",
+          payload: Buffer.from("healthy sibling"),
+          compress: false,
         },
       ],
     }),
@@ -171,6 +248,104 @@ it("extracts CArchive members through extract-artifact", async () => {
   ).toBe(false);
 });
 
+it("preserves a PYZ namespace declaration beside a physical CArchive file at the same path", async () => {
+  const path = await namespacePathCollision();
+  const inspectResult = await execute(process.execPath, [
+    cli,
+    "inspect-artifact",
+    path,
+    "--json",
+  ]);
+  const inspection = artifactInspectionResultSchema.parse(
+    parseEvidence(JSON.parse(inspectResult.stdout)).normalized_result,
+  );
+  const inventory = inspection.substeps[0]?.evidence.normalized_result;
+  expect(inventory?.coverage.status).toBe("complete");
+  const namespace = inventory?.occurrences.find(
+    (row) =>
+      row.logical_path === "PYZ.pyz/ns" &&
+      row.format_metadata?.kind === "pyinstaller-entry" &&
+      row.format_metadata.type_code === 3,
+  );
+  const data = inventory?.occurrences.find(
+    (row) =>
+      row.logical_path === "PYZ.pyz/ns" &&
+      row.entry_kind === "file" &&
+      row.format_metadata?.kind === "pyinstaller-entry" &&
+      row.format_metadata.type_code === "x",
+  );
+  expect(namespace).toMatchObject({
+    entry_kind: "metadata",
+    artifact_id: null,
+    format_metadata: {
+      container: "pyz",
+      container_name: "PYZ.pyz",
+      index: 0,
+      source_name: "ns",
+      type_code: 3,
+    },
+  });
+  expect(data).toMatchObject({
+    entry_kind: "file",
+    hash_status: "verified",
+    format_metadata: {
+      container: "carchive",
+      index: 1,
+      source_name: "PYZ.pyz/ns",
+      type_code: "x",
+    },
+  });
+  expect(namespace?.occurrence_id).not.toBe(data?.occurrence_id);
+  const dataNode = inventory?.nodes.find(
+    (node) => node.artifact_id === data?.artifact_id,
+  );
+  expect(dataNode).toMatchObject({
+    sha256: createHash("sha256").update("outer data").digest("hex"),
+    size: Buffer.byteLength("outer data"),
+  });
+  const sibling = inventory?.occurrences.find(
+    (row) => row.logical_path === "healthy.txt",
+  );
+  expect(sibling).toMatchObject({
+    hash_status: "verified",
+    format_metadata: {
+      container: "carchive",
+      index: 2,
+      source_name: "healthy.txt",
+      type_code: "x",
+    },
+  });
+  expect(
+    inventory?.nodes.find((node) => node.artifact_id === sibling?.artifact_id),
+  ).toMatchObject({
+    sha256: createHash("sha256").update("healthy sibling").digest("hex"),
+    size: Buffer.byteLength("healthy sibling"),
+  });
+
+  const extractResult = await execute(process.execPath, [
+    cli,
+    "extract-artifact",
+    path,
+    "--json",
+  ]);
+  const extracted = artifactExtractionResultSchema.parse(
+    parseEvidence(JSON.parse(extractResult.stdout)).normalized_result,
+  );
+  try {
+    expect(extracted.artifacts.map((item) => item.relative_path)).toEqual(
+      expect.arrayContaining(["PYZ.pyz/ns", "healthy.txt"]),
+    );
+    expect(
+      await readFile(join(extracted.output_root, "PYZ.pyz", "ns")),
+    ).toEqual(Buffer.from("outer data"));
+    expect(await readFile(join(extracted.output_root, "healthy.txt"))).toEqual(
+      Buffer.from("healthy sibling"),
+    );
+  } finally {
+    await rm(extracted.output_root, { recursive: true, force: true });
+  }
+});
+
 it("reports unknown traversal through the CLI for an opaque PYZ", async () => {
   const path = await onefile(Buffer.alloc(4), true, true);
   const result = await execute(process.execPath, [
@@ -199,5 +374,148 @@ it("reports unknown traversal through the CLI for an opaque PYZ", async () => {
     pyz_status: "opaque",
     encryption_source: "carchive-marker",
     compression_flag: 1,
+  });
+});
+
+it.each([
+  ["integer", marshalInt(3), true],
+  ["normalized long", marshalLong([3]), true],
+  ["unnormalized long", marshalLong([3, 0]), false],
+])(
+  "keeps PYZ namespace projection consistent with CPython for %s type codes",
+  async (_encoding, typeCode, decoded) => {
+    const path = await onefile(
+      PYTHON_39_MAGIC,
+      false,
+      false,
+      namespaceToc(typeCode),
+    );
+    const result = await execute(process.execPath, [
+      cli,
+      "inspect-artifact",
+      path,
+      "--json",
+    ]);
+    const inspection = artifactInspectionResultSchema.parse(
+      parseEvidence(JSON.parse(result.stdout)).normalized_result,
+    );
+    const inventory = inspection.substeps[0]?.evidence.normalized_result;
+    const pyz = inventory?.occurrences.find(
+      (row) => row.logical_path === "PYZ.pyz",
+    );
+    const healthySibling = inventory?.occurrences.find(
+      (row) => row.logical_path === "healthy.txt",
+    );
+    expect(healthySibling).toMatchObject({ hash_status: "verified" });
+    expect(
+      inventory?.nodes.find(
+        (node) => node.artifact_id === healthySibling?.artifact_id,
+      ),
+    ).toMatchObject({
+      sha256: createHash("sha256")
+        .update(Buffer.from("healthy sibling"))
+        .digest("hex"),
+      size: Buffer.byteLength("healthy sibling"),
+    });
+    if (decoded) {
+      expect(inventory?.coverage.status).toBe("complete");
+      expect(pyz?.format_metadata).toMatchObject({ pyz_status: "decoded" });
+      expect(
+        inventory?.occurrences.some(
+          (row) => row.logical_path === "PYZ.pyz/pkg",
+        ),
+      ).toBe(true);
+    } else {
+      expect(inventory?.coverage.status).toBe("unknown");
+      expect(pyz?.format_metadata).toMatchObject({ pyz_status: "opaque" });
+      expect(
+        inventory?.occurrences.some(
+          (row) => row.logical_path === "PYZ.pyz/pkg",
+        ),
+      ).toBe(false);
+      expect(pyz?.limitations.join(" ")).toContain("long is not normalized");
+    }
+  },
+);
+
+it.each([
+  ["negative string length", "5b0100000073ffffffff"],
+  ["negative list count", "5bffffffff"],
+  ["negative tuple count", "28ffffffff"],
+  ["truncated string", "5b010000007301000000"],
+  ["unsupported marshal type", "5b010000004e"],
+])(
+  "keeps healthy CArchive siblings when the PYZ table has %s",
+  async (_description, tocHex) => {
+    const path = await onefile(
+      PYTHON_39_MAGIC,
+      false,
+      false,
+      Buffer.from(tocHex, "hex"),
+    );
+    const result = await execute(process.execPath, [
+      cli,
+      "inspect-artifact",
+      path,
+      "--json",
+    ]);
+    const inspection = artifactInspectionResultSchema.parse(
+      parseEvidence(JSON.parse(result.stdout)).normalized_result,
+    );
+    const inventory = inspection.substeps[0]?.evidence.normalized_result;
+    expect(inventory?.coverage.status).toBe("unknown");
+    expect(inventory?.occurrences.map((item) => item.logical_path)).toEqual(
+      expect.arrayContaining(["hello", "healthy.txt", "PYZ.pyz"]),
+    );
+    const healthySibling = inventory?.occurrences.find(
+      (item) => item.logical_path === "healthy.txt",
+    );
+    expect(healthySibling).toMatchObject({
+      hash_status: "verified",
+      artifact_id: expect.any(String),
+    });
+    expect(
+      inventory?.nodes.find(
+        (node) => node.artifact_id === healthySibling?.artifact_id,
+      ),
+    ).toMatchObject({
+      sha256: createHash("sha256")
+        .update(Buffer.from("healthy sibling"))
+        .digest("hex"),
+      size: Buffer.byteLength("healthy sibling"),
+    });
+    expect(
+      inventory?.occurrences.find((item) => item.logical_path === "PYZ.pyz"),
+    ).toMatchObject({
+      format_metadata: { pyz_status: "opaque" },
+    });
+  },
+);
+
+it("keeps positive over-budget PYZ sizes as resource refusals", async () => {
+  const path = await onefile(
+    PYTHON_39_MAGIC,
+    false,
+    false,
+    Buffer.from("7301000100", "hex"),
+  );
+  let failure: { code: unknown; stdout: string } | undefined;
+  try {
+    await execute(process.execPath, [cli, "inspect-artifact", path, "--json"]);
+  } catch (error: unknown) {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      "stdout" in error &&
+      typeof error.stdout === "string"
+    )
+      failure = { code: error.code, stdout: error.stdout };
+    else throw error;
+  }
+  expect(failure?.code).toBe(1);
+  expect(JSON.parse(failure?.stdout ?? "null")).toMatchObject({
+    code: "truncated",
+    details: { reason: "limit" },
   });
 });

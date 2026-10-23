@@ -311,37 +311,43 @@ export const parseDumpsysPackageOutput = (
     userId: null,
     pkgFlags: null,
   };
-  let inPermissions = false;
+  let permissionsIndent: number | null = null;
   let hasPermissionsSection = false;
   let permissions = 0;
   let parsedPackageAvailable: boolean | null = null;
   for (const line of stdout.split(/\r?\n/u)) {
     // Hidden system packages describe a separate section, not the requested package.
     if (/^\s*Hidden system packages:\s*$/u.test(line)) break;
-    if (line.trim().startsWith("requested permissions:")) {
+    const permissionsHeader = /^(\s*)requested permissions:\s*$/u.exec(line);
+    if (permissionsHeader !== null) {
       hasPermissionsSection = true;
-      inPermissions = true;
+      permissionsIndent = permissionsHeader[1]!.length;
       continue;
     }
-    // Android 10 and 11 mark restricted entries as "NAME: restricted=true".
-    if (
-      inPermissions &&
-      /^\s{2,}[A-Za-z0-9._$-]+(?:: restricted=true)?$/u.test(line)
-    ) {
-      permissions += 1;
-      continue;
+    if (permissionsIndent !== null) {
+      const indentation = /^\s*/u.exec(line)![0].length;
+      if (line.trim() !== "" && indentation > permissionsIndent) {
+        // Android 10 and 11 may append ": restricted=true" to a row. The
+        // section is indentation-delimited; permission strings are arbitrary.
+        permissions += 1;
+        continue;
+      }
+      if (line.trim() === "" && indentation > permissionsIndent) continue;
+      permissionsIndent = null;
     }
-    inPermissions = false;
     const match = DETAIL_LINE.exec(line);
     if (match === null) continue;
     const key = match[1]!;
-    const value = match[2]!.trim();
+    // versionName is an arbitrary manifest string, printed verbatim by AOSP.
+    // Only the fields with their own structured grammar are normalized below.
+    const rawValue = match[2]!;
+    const value = rawValue.trim();
     if (key === "pkg" && parsedPackageAvailable === null) {
       if (value === "null") parsedPackageAvailable = false;
       else if (value.startsWith("Package{") && value.endsWith("}"))
         parsedPackageAvailable = true;
     } else if (key === "versionName" && details.versionName === null)
-      details.versionName = value === "" ? null : value;
+      details.versionName = rawValue;
     else if (key === "versionCode" && details.versionCode === null) {
       const parsed = /^(-?\d+)/u.exec(value);
       if (parsed !== null) details.versionCode = parsed[1]!;

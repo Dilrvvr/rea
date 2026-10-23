@@ -269,6 +269,13 @@ while comparisons and trace assertions use the normalized text. Retaining the
 original adds at most `limits.output_bytes` of text, because it comes from the
 same admitted PTY chunks rather than a second unbounded stream.
 
+When path normalization is enabled, aliases apply to selected path identities
+at clear text delimiters. A selected executable path does not alias a longer
+sibling filename such as `tool-helper`; selected parent directories still
+normalize within descendant paths. The comparison contract records these rules as
+`path-component-boundaries-v2`, so captures made with the earlier prefix rules
+cannot be compared as if the text had the same meaning.
+
 Rendered frame `lines` hold the visible rows after normalization, with trailing
 U+0020 spaces removed. Blank rows and internal spaces remain. `columns` records
 terminal cell width; normalization and Unicode can make string lengths differ
@@ -334,6 +341,10 @@ to a bare PID kill for either finalization signal; failed identity or ownership
 validation is recorded as `unverified` with its reason. Cancellation before any
 deadline keeps the existing terminal kill. Descendants are not signalled during
 finalization; owned-process cleanup handles them afterwards.
+
+For an `exited` capture, `exit.code` is the target's normal exit code. It is
+`null` when the target ended on a signal, such as one sent by a scenario
+`signal` event, and the observed signal stays in `exit.signal`.
 
 `exit.reason` keeps the initiating deadline (`timeout` or `idle_timeout`).
 `exit.code` is `null` for every deadline exit; the code of an exit observed
