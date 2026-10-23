@@ -60,7 +60,10 @@ Before applying changes, REA checks your current configuration. The plan lists:
 
 Malformed or unsafe existing configuration blocks the whole transaction before
 Hopper installation or any file write. Declining or pressing Ctrl-C makes no
-changes. Agent configuration writes preserve unrelated entries and comments,
+changes. Client configuration files and bundled skill files have separate
+publication and recovery paths; the guarantees in this paragraph apply to
+client configuration. See [skill destinations](#skill-destinations) for skill
+rollback limits. Agent configuration writes preserve unrelated entries and comments,
 create backups, stage changes in a private directory, and verify their result.
 Before publication, they refuse detected changes to the selected configuration.
 Replacement uses an explicit destination under the selected canonical parent;
@@ -85,6 +88,11 @@ Setup also retains valid environment overrides in REA's existing server entry,
 such as `REA_MCP_INPUT_SCHEMA_PROFILE`, `REA_MCP_OUTPUT_SCHEMA_PROFILE`, and
 `REA_MCP_MAX_RESPONSE_BYTES`.
 Detected provider settings replace only matching environment keys.
+Setup manages REA's launcher, selected provider settings, and supported timeout
+defaults. Client approval policies remain user choices, but the current Codex
+refresh drops those policies inside the REA entry; see the
+[Codex preservation limitation](client-configuration.md#codex-and-devin) before
+refreshing a customized registration.
 Setup and doctor report a malformed REA environment map or invalid runtime
 setting before setup writes files. Repair the named setting in the client
 configuration; setup does not silently discard the rest of the map.
@@ -161,6 +169,26 @@ do not block other setup choices. Doctor reports linked or non-directory skill
 paths as `unmanaged`, names the affected paths, and provides those alternatives;
 an unreadable skill identity remains `unknown`. Uninstall retains and reports
 files it cannot safely remove, including their ownership manifest.
+
+The skill installer preserves byte-exact backups of changed existing files,
+including invalid UTF-8, BOMs, and permission modes, and verifies each published
+file through its owned descriptor. Before publication it checks the selected
+file identity; first installation uses an exclusive hard link and refuses a
+concurrently created destination. Filesystems without hard-link support cannot
+publish a first-install skill file.
+
+Rollback restores an existing file only while its published identity, state,
+and bytes still match that installation attempt. A recovery backup preserves
+the original bytes; it does not authorize overwriting a later user edit or
+replacement. Conflicts report the affected paths and recovery backups. If a
+newly created skill file cannot be verified, setup retains it and reports manual
+recovery rather than deleting by pathname. Staging cleanup failures remain
+owned and retryable, and setup does not report installation success while
+cleanup is unresolved.
+
+These checks do not lock out another writer modifying the same inode or exclude
+pathname changes between the last check and publication. Avoid editing managed
+skill files or running another installer while setup applies them.
 
 `rea setup --skill-client claude_code --yes --json` refreshes and verifies the
 selected skill destination independently of MCP registration selection. The
@@ -736,7 +764,9 @@ and skips directories.
 On Linux, it prefers executable `/opt/hopper/bin/Hopper`, then executable
 `~/.local/share/rea/hopper/bin/Hopper`, followed by `/opt/hopper-v4/bin/hopper`
 and `/usr/bin/hopper`; if none exists, the former remains the diagnostic
-fallback. `HOPPER_LAUNCHER_PATH` overrides those choices:
+fallback. `rea doctor` checks only the current platform's candidates, in the
+same order; other platforms have no automatic candidates.
+`HOPPER_LAUNCHER_PATH` overrides those choices:
 
 ```bash
 export HOPPER_LAUNCHER_PATH=/absolute/path/to/Hopper

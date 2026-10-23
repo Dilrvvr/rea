@@ -1,3 +1,4 @@
+import { isSelectedRegularFileError } from "../../filesystem/RegularFile.js";
 import { ArtifactReaderFailure } from "../../artifacts/ArtifactReader.js";
 import { readStableArtifact } from "../../artifacts/readStableArtifact.js";
 import {
@@ -24,7 +25,7 @@ import {
 } from "../../domain/native/peCertificates.js";
 import { err, ok } from "../../domain/result.js";
 import { ProviderCleanupError } from "../../domain/providerCleanupError.js";
-import { PE_CERTIFICATES_PROVIDER } from "../../application/InvestigationProviders.js";
+import { PE_CERTIFICATES_PROVIDER } from "../../domain/investigationProviders.js";
 import { parsePeCertificates } from "./PeCertificateParser.js";
 
 const OPERATION = "inspect_pe_certificates";
@@ -148,11 +149,7 @@ const peCertificatesFailurePrimary = (
       return new AnalysisAccessDeniedError(OPERATION, input.path, cause.code, {
         cause,
       });
-    if (
-      ["ENOENT", "ENOTDIR", "ELOOP", "ENAMETOOLONG"].includes(
-        String(cause.code),
-      )
-    )
+    if (isSelectedRegularFileError(cause))
       return new AnalysisInputError(OPERATION, { cause }, [
         {
           path: ["path"],

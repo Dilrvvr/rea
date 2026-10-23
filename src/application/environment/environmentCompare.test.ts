@@ -36,7 +36,7 @@ import {
   parameterScopes,
 } from "./environmentCompareMatch.js";
 import type { EnvironmentManifestTool } from "./environmentSource.js";
-import { isCut } from "./environmentCompareProbe.js";
+import { isCut, probeRequests } from "./environmentCompareProbe.js";
 import { parseCaptureEvidence } from "./environmentSource.js";
 
 const fixture = environmentStateServeFixture(timedCaptureEvidence(BOOK_ROWS));
@@ -65,6 +65,32 @@ const compare = (...probes: (readonly TimedCaptureRow[])[]) => {
 };
 
 describe("matchProbeRequest", () => {
+  it("compares a repeated-query probe against the matching recorded response", () => {
+    const recorded = timedCaptureEvidence([
+      ["GET", "/api/items?tag=a&tag=b", { selected: "b" }],
+      ["GET", "/api/items?tag=a&tag=c", { selected: "c" }],
+    ]);
+    const served = environmentStateServeFixture(recorded);
+    const report = compareEnvironment({
+      source: environmentServeSource(served),
+      captureValue: recorded,
+      probes: [
+        {
+          label: "repeated-query",
+          value: timedCaptureEvidence([
+            ["GET", "/api/items?tag=a&tag=c", { selected: "c" }],
+          ]),
+        },
+      ],
+      operation: "environment-compare",
+    });
+    if (!report.ok) throw report.error;
+    expect(report.value.probes[0]?.results[0]).toMatchObject({
+      equal: true,
+      ignored_query: [],
+    });
+  });
+
   it("prefers literal segments, requires format-rule parameters to fit, and maps query and body arguments", () => {
     const item = matchProbeRequest(source.manifest, {
       method: "GET",
@@ -102,6 +128,16 @@ describe("matchProbeRequest", () => {
     expect(item?.tool.path_template).toBe("/api/books/{numeric}");
     // The environment decodes this once, as replay decodes a recorded segment once.
     expect(item?.args).toEqual({ id: "%31" });
+  });
+
+  it("keeps every occurrence of a repeated query value", () => {
+    const item = matchProbeRequest(environmentServeSource().manifest, {
+      method: "GET",
+      path: "/api/search",
+      query: "?query=one&query=two&type=dash-db",
+      body: undefined,
+    });
+    expect(item?.args).toEqual({ query: ["one", "two"], type: "dash-db" });
   });
 });
 
@@ -556,45 +592,151 @@ describe("ids the comparison used to misread", () => {
 
 describe("browser probes", () => {
   it("keeps a browser probe's request bodies, which are its call arguments", () => {
+    const responseBody = '{"note":"postData is response text"}';
+    const responseContent = {
+      text: Buffer.from(responseBody).toString("base64"),
+      encoding: "base64",
+    };
+    const capture = scenarioCaptureEvidence(
+      scenarioCaptureFixture([
+        {
+          method: "POST",
+          url: "/api/folders",
+          status: 200,
+          mediaType: "application/json",
+          body: responseBody,
+          requestMediaType: "application/json",
+          requestBody: '{"title":"probe folder"}',
+        },
+      ]),
+    );
     const post = (purpose?: "manifest") => {
       const parsed = parseCaptureEvidence(
         "environment-compare",
-        scenarioCaptureEvidence(),
+        capture,
         purpose,
       );
       if (!parsed.ok) throw parsed.error;
-      return parsed.value.records.find((record) =>
-        JSON.stringify(record.reported).includes('"method":"POST"'),
-      )?.reported;
+      expect(parsed.value.records).toHaveLength(1);
+      const record = parsed.value.records[0];
+      if (record === undefined) throw new Error("Scenario capture lacks POST");
+      return record.reported;
     };
-    expect(JSON.stringify(post("manifest"))).toContain("postData");
-    expect(JSON.stringify(post())).not.toContain("postData");
+    expect(post("manifest")).toMatchObject({
+      request: {
+        method: "POST",
+        postData: {
+          mimeType: "application/json",
+          text: '{"title":"probe folder"}',
+        },
+      },
+      response: {
+        content: responseContent,
+      },
+    });
+    expect(post()).toMatchObject({
+      request: { method: "POST" },
+      response: {
+        content: responseContent,
+      },
+    });
+    expect(post()).not.toHaveProperty("request.postData");
   });
 });
 
-describe("what a probe did not observe", () => {
-  const at = (second: number): string =>
-    new Date(
-      Date.parse("2026-10-20T09:00:00.000Z") + second * 1000,
-    ).toISOString();
-  const exchange = (
-    second: number,
-    method: string,
-    url: string | null,
-    status: number,
-  ) => ({
-    startedDateTime: at(second),
-    request: { method, url },
-    response: { status, content: { mimeType: "application/json" } },
+const at = (second: number): string =>
+  new Date(
+    Date.parse("2026-10-20T09:00:00.000Z") + second * 1000,
+  ).toISOString();
+const exchange = (
+  second: number,
+  method: string,
+  url: string | null,
+  status: number,
+) => ({
+  startedDateTime: at(second),
+  request: { method, url },
+  response: { status, content: { mimeType: "application/json" } },
+});
+const run = (value: unknown) =>
+  compareEnvironment({
+    source,
+    captureValue: fixture.capture,
+    probes: [{ label: "probe-1", value }],
+    operation: "environment-compare",
   });
-  const run = (value: unknown) =>
-    compareEnvironment({
-      source,
-      captureValue: fixture.capture,
-      probes: [{ label: "probe-1", value }],
-      operation: "environment-compare",
-    });
 
+describe("probe request chronology", () => {
+  it.each([
+    ["2026-10-20T09:00:00.0002Z", "2026-10-20T09:00:00.0001Z"],
+    ["2026-10-20T09:00:00.0000000002Z", "2026-10-20T09:00:00.0000000001Z"],
+    ["0001-01-01T00:00:00.0002Z", "0001-01-01T01:00:00.0001+01:00"],
+  ])(
+    "replays an earlier delete before a later submillisecond read (%s)",
+    (later, earlier) => {
+      const report = run(
+        analysisViewCaptureEvidence(
+          environmentManifestCaptureFixture([
+            {
+              ...exchange(1, "GET", "http://app.example/api/books/2", 404),
+              startedDateTime: later,
+              response: {
+                status: 404,
+                content: {
+                  mimeType: "application/json",
+                  text: JSON.stringify(BOOK_NOT_FOUND),
+                },
+              },
+            },
+            {
+              ...exchange(0, "DELETE", "http://app.example/api/books/2", 204),
+              startedDateTime: earlier,
+            },
+          ]),
+        ),
+      );
+      if (!report.ok) throw report.error;
+      expect(
+        report.value.probes[0]?.results.map(({ ordinal, env_status }) => [
+          ordinal,
+          env_status,
+        ]),
+      ).toEqual([
+        [1, 204],
+        [0, 404],
+      ]);
+      expect(report.value.summary).toMatchObject({
+        steps: 2,
+        equal: 2,
+        agreement: 1,
+      });
+    },
+  );
+
+  it.each([
+    ["2026-10-20T09:00:00.000100Z", "2026-10-20T10:00:00.0001+01:00"],
+    ["Tue, 20 Oct 2026 09:00:00 GMT", "2026-10-20T09:00:00Z"],
+  ])(
+    "keeps ordinal order for equal instants and native-Date spelling compatibility (%s)",
+    (left, right) => {
+      const capture = environmentManifestCaptureFixture([
+        {
+          ...exchange(0, "GET", "http://app.example/api/books/1", 200),
+          startedDateTime: left,
+        },
+        {
+          ...exchange(1, "GET", "http://app.example/api/books/2", 200),
+          startedDateTime: right,
+        },
+      ]);
+      expect(
+        probeRequests(capture.records).steps.map(({ ordinal }) => ordinal),
+      ).toEqual([0, 1]);
+    },
+  );
+});
+
+describe("what a probe did not observe", () => {
   it("compares an unrecorded body by status only and lists the records it could not compare", () => {
     const report = run(
       analysisViewCaptureEvidence(

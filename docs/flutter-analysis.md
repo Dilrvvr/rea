@@ -108,7 +108,12 @@ server; older servers keep the complete request after schema discovery.
   `build_id_candidates` preserves distinct IDs. `build_id` is populated only
   when all declared note ranges were examined and one ID was found;
   conflicting IDs or malformed/bounded note metadata make coverage partial.
+  Nonempty GNU build-ID descriptors up to 64 bytes are retained as lowercase
+  hexadecimal, including IDs shorter than four bytes.
   Matching bytes outside declared note ranges cannot supply a build ID.
+  Compressed `SHT_NOTE` sections are skipped with an unsupported-compression
+  limitation and partial coverage; IDs from other note ranges remain candidates.
+  Encoded note storage is never interpreted as note headers or inflated.
 - Labeled strings must fit their complete grammar. `dart_version_capped`
   and `toolchain_capped` independently report labels omitted by grammar or
   projection bounds; either makes identification coverage partial. Values
@@ -152,9 +157,16 @@ server; older servers keep the complete request after schema discovery.
 - **Selected ABI.** AOT inspection applies the library budget to the selected
   ABI after selection; an oversized unselected library does not block it.
   Undefined dynamic-symbol imports are not treated as snapshot exports.
+  A retained section directory without `SHT_DYNSYM` uses the same bounded
+  `PT_DYNAMIC` symbol description as a section-stripped image. Malformed
+  present symbol-table sections remain failures.
   Section-stripped images require a bounded symbol count from `DT_HASH` or
   `DT_GNU_HASH`; layouts without either are refused. Symbol names and their
-  terminators must fit their linked string table.
+  terminators must fit their linked string table. Only dynamic entries used for
+  symbol discovery are interpreted as numeric bounds. ABI-ignored payloads,
+  including [`DT_BIND_NOW`](https://gabi.xinuos.com/elf/08-dynamic.html#dynamic-section),
+  do not change discovery; their stored bytes still contribute to the selected
+  artifact's digest.
 - REA performs **no hash-to-SDK lookup**: mapping the snapshot hash to a
   Dart SDK release requires an external dataset and is deliberately out of
   scope for this family.

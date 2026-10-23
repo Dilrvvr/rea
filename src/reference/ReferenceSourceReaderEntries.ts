@@ -16,6 +16,7 @@ import {
 import { isPathWithinRoot } from "../domain/localPath.js";
 import { pathFromRoot } from "./ReferenceSourceReaderPaths.js";
 import { readStableFile } from "./ReferenceSourceReaderFile.js";
+import { decodeDirectoryEntryName } from "../filesystem/decodeDirectoryEntryName.js";
 import {
   isAborted,
   sameFile,
@@ -97,13 +98,13 @@ export const traverseDirectory = async (
           readFailure = "Directory entry name was not returned as raw bytes";
           break;
         }
-        const name = child.name.toString("utf8");
-        if (!Buffer.from(name, "utf8").equals(child.name)) {
+        const decoded = decodeDirectoryEntryName(child.name);
+        if (decoded.kind === "unrepresentable") {
           unrepresentableNameCount += 1;
-          firstUnrepresentableNameHex ??= child.name.toString("hex");
+          firstUnrepresentableNameHex ??= decoded.rawHex;
           continue;
         }
-        result = await processEntry(state, current, name, directories);
+        result = await processEntry(state, current, decoded.name, directories);
         if (!result.ok) break;
       }
     } finally {
@@ -376,9 +377,12 @@ const readSymlinkTarget = async (
   absolute: string,
   path: string,
 ): Promise<ReferenceSourceEntry> => {
-  let rawTarget: string;
+  let rawTarget: Buffer;
   try {
-    rawTarget = await readlink(absolute);
+    // Keep the symlink's source bytes until UTF-8 validity is known. The
+    // default string encoding can alias an invalid target with a real U+FFFD
+    // sibling during the subsequent path lookup.
+    rawTarget = await readlink(absolute, { encoding: "buffer" });
   } catch (cause: unknown) {
     // POSIX readlink reports EINVAL when the observed link became a non-link.
     // Keep this classification at the syscall, rather than hiding EINVAL from
@@ -387,7 +391,21 @@ const readSymlinkTarget = async (
       return changedSymlink(path);
     throw cause;
   }
-  const lexicalTarget = resolve(dirname(absolute), rawTarget);
+  let target: string;
+  try {
+    target = new TextDecoder("utf-8", {
+      fatal: true,
+      ignoreBOM: true,
+    }).decode(rawTarget);
+  } catch {
+    return entryFailure(
+      path,
+      "symlink",
+      "unsupported",
+      `Symlink target is not valid UTF-8 (raw target bytes: ${rawTarget.toString("hex")})`,
+    );
+  }
+  const lexicalTarget = resolve(dirname(absolute), target);
   if (!isPathWithinRoot(root, lexicalTarget))
     return {
       status: "read",

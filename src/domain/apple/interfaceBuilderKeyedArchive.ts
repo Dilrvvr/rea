@@ -245,14 +245,19 @@ const keyedArchiveTable = (objectTable: readonly unknown[]) => {
       ? text
       : undefined;
   };
-  const text = (value: unknown): string | null => {
-    const uid = archiveUid(value);
-    return firstString(
-      uid === undefined ? value : archivedString(objectTable[uid]),
-    );
+  /** Only an encoded UID proves which archived object a connector names. */
+  const objectReference = (...values: unknown[]): string | null => {
+    for (const value of values) {
+      const uid = archiveUid(value);
+      if (
+        uid !== undefined &&
+        uid !== 0 &&
+        Object.hasOwn(record(objectTable[uid]), "$class")
+      )
+        return String(uid);
+    }
+    return null;
   };
-  const authoredId = (item: Record<string, unknown>): string | null =>
-    firstString(text(item.objectID), text(item["object-id"]));
   const reference = (uid: number): unknown => {
     // UID 0 is the archived nil.
     const target = uid === 0 ? null : objectTable[uid];
@@ -260,10 +265,8 @@ const keyedArchiveTable = (objectTable: readonly unknown[]) => {
     if (typeof target !== "object") return target;
     const string = archivedString(target);
     if (string !== undefined) return string;
-    const objectId = authoredId(record(target));
     return {
       archiveUID: uid,
-      ...(objectId === null ? {} : { objectID: objectId }),
       className: classNameOf(target),
     };
   };
@@ -275,8 +278,10 @@ const keyedArchiveTable = (objectTable: readonly unknown[]) => {
     if (typeof value !== "object" || value === null) return value;
     const output: Record<string, unknown> = {};
     for (const [key, child] of Object.entries(value)) {
-      if (key === "$class") output.className = classNameOf(value);
-      else output[key] = resolve(child);
+      // `$class` describes the archived object's type. Keep that derived fact
+      // outside its serialized fields so an authored `className` key remains
+      // ordinary application data.
+      if (key !== "$class") output[key] = resolve(child);
     }
     return output;
   };
@@ -289,21 +294,11 @@ const keyedArchiveTable = (objectTable: readonly unknown[]) => {
     ];
     const appendNode = (
       item: Record<string, unknown>,
-      uid: number | undefined,
+      uid: number,
       output: unknown[],
     ): void => {
-      const objectId = firstString(
-        authoredId(item),
-        text(item.id),
-        uid === undefined ? null : String(uid),
-      );
-      if (objectId === null) {
-        for (const [key, child] of Object.entries(item).reverse())
-          if (HIERARCHY_KEY.test(key)) pending.push({ value: child, output });
-        return;
-      }
       const children: unknown[] = [];
-      output.push({ objectID: objectId, children });
+      output.push({ objectID: String(uid), children });
       for (const [key, child] of Object.entries(item).reverse())
         if (HIERARCHY_KEY.test(key))
           pending.push({ value: child, output: children });
@@ -350,7 +345,11 @@ const keyedArchiveTable = (objectTable: readonly unknown[]) => {
           if (child !== undefined) pending.push({ value: child, output });
         }
       } else if (typeof value === "object" && value !== null) {
-        appendNode(record(value), undefined, output);
+        // Inline dictionaries have no object-table identity. Preserve any
+        // independently referenced children without inventing a parent ID.
+        omittedReferences += 1;
+        for (const [key, child] of Object.entries(value).reverse())
+          if (HIERARCHY_KEY.test(key)) pending.push({ value: child, output });
       }
     }
     return { items: root, omittedReferences };
@@ -372,7 +371,15 @@ const keyedArchiveTable = (objectTable: readonly unknown[]) => {
           : [[facts.name, { superclasses: facts.rawSuperclasses }]];
       }),
     );
-  return { resolve, hierarchy, hasClassSuperclass, classChainOf, classTable };
+  return {
+    resolve,
+    hierarchy,
+    classNameOf,
+    hasClassSuperclass,
+    classChainOf,
+    classTable,
+    objectReference,
+  };
 };
 
 /** Project class and connection objects from an NSKeyedArchiver object table. */
@@ -385,9 +392,11 @@ const parseKeyedArchive = (
   const {
     resolve,
     hierarchy: toHierarchy,
+    classNameOf,
     hasClassSuperclass,
     classChainOf,
     classTable,
+    objectReference,
   } = keyedArchiveTable(objectTable);
   const objects: InterfaceBuilderObject[] = [];
   const connections: InterfaceBuilderConnection[] = [];
@@ -397,23 +406,18 @@ const parseKeyedArchive = (
   for (const [index, raw] of objectTable.entries()) {
     if (index === 0) continue;
     const resolved = record(resolve(raw));
-    const className = firstString(resolved.className);
+    const className = classNameOf(raw);
     // An archived object names its class with its own `$class` reference;
     // when that reference cannot be resolved the object is still observed,
     // with an unknown class. Scalars and class descriptors are not objects.
     if (className === null && !Object.hasOwn(record(raw), "$class")) continue;
     objectCount += 1;
-    const fields = Object.fromEntries(
-      Object.entries(resolved).filter(([key]) => key !== "className"),
-    );
+    const fields = { ...resolved };
     // Keep the unresolvable class reference itself, e.g. a dangling UID.
     if (className === null) fields.$class = record(raw).$class;
-    const authoredId = firstString(fields.objectID, fields["object-id"]);
-    const objectId =
-      authoredId ??
-      (typeof fields.archiveUID === "number"
-        ? String(fields.archiveUID)
-        : String(index));
+    // Authored objectID, object-id, id and archiveUID fields are data. Only
+    // the original table position identifies an archived object.
+    const objectId = String(index);
     const kind = classifyObject(className, classChainOf(raw));
     if (objects.length < 20_000)
       objects.push(
@@ -443,13 +447,14 @@ const parseKeyedArchive = (
       // class-specific field namespaces; the source is the outlet owner.
       const connectionFields = interfaceBuilderConnectionFieldNames(className);
       if (isSourceLessAppKitAnnotationConnector(className, fields)) continue;
+      const rawFields = record(raw);
       const source = uiKit
-        ? archivedObjectReference(fields[connectionFields.source])
-        : firstObjectReference(
-            controlAction ? fields.destination : fields.source,
-            archivedObjectReference(fields[connectionFields.source]),
-            controlAction ? fields.to : fields.from,
-            controlAction ? fields.target : fields.owner,
+        ? objectReference(rawFields[connectionFields.source])
+        : objectReference(
+            controlAction ? rawFields.destination : rawFields.source,
+            rawFields[connectionFields.source],
+            controlAction ? rawFields.to : rawFields.from,
+            controlAction ? rawFields.target : rawFields.owner,
           );
       if (source === null) {
         // A recognized connector that cannot name its owner is an unresolved
@@ -464,12 +469,12 @@ const parseKeyedArchive = (
         kind,
         source_id: source,
         destination_id: uiKit
-          ? archivedObjectReference(fields[connectionFields.destination])
-          : firstObjectReference(
-              controlAction ? fields.source : fields.destination,
-              archivedObjectReference(fields[connectionFields.destination]),
-              controlAction ? fields.from : fields.to,
-              controlAction ? fields.owner : fields.target,
+          ? objectReference(rawFields[connectionFields.destination])
+          : objectReference(
+              controlAction ? rawFields.source : rawFields.destination,
+              rawFields[connectionFields.destination],
+              controlAction ? rawFields.from : rawFields.to,
+              controlAction ? rawFields.owner : rawFields.target,
             ),
         label: uiKit
           ? firstString(fields[connectionFields.label])
@@ -487,7 +492,13 @@ const parseKeyedArchive = (
     }
   }
   const top = record(root.$top);
-  const hierarchy = toHierarchy(top.root ?? top.UITopLevelObjectsKey);
+  // UIKit names its top-level collection explicitly. A present but undecoded
+  // named root must not be replaced by an unrelated generic root alias.
+  const hierarchy = toHierarchy(
+    Object.hasOwn(top, "UINibTopLevelObjectsKey")
+      ? top.UINibTopLevelObjectsKey
+      : top.root,
+  );
   const classes = classTable();
   return {
     objects,
@@ -510,35 +521,6 @@ export const record = (value: unknown): Record<string, unknown> =>
 export const firstString = (...values: unknown[]): string | null => {
   for (const value of values)
     if (typeof value === "string" && value.length > 0) return value;
-  return null;
-};
-
-/**
- * The node identity of a resolved archive reference: its authored object ID,
- * otherwise its archive UID, which is how the referenced object's node is keyed.
- */
-const archivedObjectReference = (value: unknown): string | null => {
-  const item = record(value);
-  if (typeof item.archiveUID !== "number") return null;
-  return (
-    firstString(item.objectID, item["object-id"]) ?? String(item.archiveUID)
-  );
-};
-
-const firstObjectReference = (...values: unknown[]): string | null => {
-  for (const value of values) {
-    const direct = firstString(value);
-    if (direct !== null) return direct;
-    const item = record(value);
-    const objectId = firstString(
-      item.objectID,
-      item["object-id"],
-      item.id,
-      item.identifier,
-      typeof item.archiveUID === "number" ? String(item.archiveUID) : null,
-    );
-    if (objectId !== null) return objectId;
-  }
   return null;
 };
 

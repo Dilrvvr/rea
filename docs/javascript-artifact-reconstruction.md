@@ -252,7 +252,8 @@ Selected bounded text is then parsed as inert data to recover:
 - Electron preload paths and renderer files visible in static syntax;
 - local HTML script entrypoints;
 - Webpack and Rspack chunk registrations and module factories represented as
-  AST literals;
+  AST literals, plus esbuild `__commonJS` module tables; recovered esbuild
+  CommonJS exports use its factory's `exports`-then-`module` parameter order;
 - static imports, dynamic imports, CommonJS `require` calls, workers, and
   service workers (only `new Worker(new URL(path, import.meta.url))` resolves
   relative to the calling module; string worker and service-worker paths use
@@ -513,6 +514,11 @@ inventory digest before parsing, and malformed ASAR operations return typed
 format diagnostics that retain the local container path. Native add-ons are
 represented by metadata only.
 
+POSIX directory names are read as raw bytes and admitted as logical paths only
+when they round-trip through UTF-8. Invalid names are left untouched, retained
+siblings remain inventoried, and traversal coverage is marked unknown with the
+first rejected basename bytes identified in hexadecimal.
+
 ## Bounds and coverage
 
 The reconstruction keeps internal resource safeguards for artifact entries,
@@ -636,6 +642,13 @@ execution and memory limits continue to determine examined coverage. Raising onl
 a node capacity does not raise the unknown capacity. Graphs without unknown
 omissions omit this optional coverage field, preserving their existing identities.
 
+These node and unknown capacities bound retained graph projection. Parsing,
+static analysis and semantic fact construction precede that projection for an
+admitted source. Lowering the capacities can reduce projection and retention
+work, but does not bound upstream semantic-analysis time or memory. Select fewer
+`source_paths` to reduce the sources analyzed; heap and deadline controls set
+separate resource failure boundaries with the runtime-specific limits above.
+
 While sources remain, the sequential worker reserves one next compact static
 checkpoint at its 8 MiB bound with the same 6x retention expansion used at
 admission. Earlier checkpoints are already charged to retained bytes; the
@@ -755,6 +768,24 @@ in `/` are invalid. Imports arrays skip invalid parent-relative, absolute, and
 URL targets before selecting a later package-local file; an unsupported bare
 package or recursive alias keeps its unresolved outcome rather than selecting
 a later fallback.
+
+For a proven `createRequire(new URL(relativeFile, import.meta.url))` call,
+relative `require()` edges use the selected filename's directory and retain the
+source-relative `resolution_base_path` on the graph edge. This follows Node's
+`createRequire(filename)` contract; the path is a loader-resolution fact and
+does not change the source file or call-site Evidence identity. If the filename
+cannot be proven, REA keeps the require target unresolved rather than silently
+resolving it from the caller's directory.
+
+Module-reference graph edges, including native-addon `loads` edges, retain
+`properties.operation`: `load` identifies
+an import or loader invocation that may execute the target; `resolve` identifies
+a proven `require.resolve()` lookup that discovers a target without executing it.
+Both retain the exact specifier, resolution mode, selected resolution base, and
+call-site Evidence. Resolve-only edges do not propagate application ownership or
+create executable-import gaps when their targets are missing. A modified
+`.resolve` member remains an uncertain `load`, because its replacement may execute
+code. These static facts do not establish that a call runs at runtime.
 
 ESM relative module paths, legacy package subpaths without exports, and selected
 package exports targets use URL suffix handling and one percent-decoding pass.

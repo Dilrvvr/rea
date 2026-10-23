@@ -1,13 +1,10 @@
 import { constants } from "node:buffer";
 import type { Writable } from "node:stream";
 
-import { Filter, Formatter } from "incur";
+import { Filter } from "incur";
 import { estimateTokenCount } from "tokenx";
 
-import {
-  parseCliOutputArguments,
-  validateCliOutputArguments,
-} from "../cliOutput.js";
+import type { ParsedCliOutputArguments } from "../cliOutput.js";
 import {
   cliOperationFailureIdentity,
   cliOperationFailurePayload,
@@ -18,6 +15,9 @@ import {
   projectAnalysisError,
   type AnalysisErrorProjection,
 } from "../domain/analysisErrorProjection.js";
+import { formatCliOutput } from "./cliOutputFormatter.js";
+import { jsonLinesErrorRecord } from "./jsonLines.js";
+import { writeCliJsonLines } from "./jsonLinesOutput.js";
 import {
   jsonOutputParts,
   writeJsonOutput,
@@ -42,6 +42,13 @@ export interface CliResultOutput {
   readonly handled: boolean;
   readonly failed: boolean;
   readonly error: AnalysisErrorProjection | undefined;
+  /** Start another completed invocation on a reusable command registry. */
+  begin(options: ParsedCliOutputArguments): void;
+  /** SDK generators retain their own streaming event protocol. */
+  delegateStreaming(): void;
+  /** Retain one-shot SDK output until the SDK supplies its authoritative status. */
+  captureSdkOutput(text: string): boolean;
+  finishSdkOutput(exitCode: number): Promise<void>;
   write(value: unknown, metadata: CliResultOutputMetadata): Promise<boolean>;
   /** Recover only before any delegated stdout has been written. */
   recoverFormattingFailure(cause: unknown): Promise<boolean>;
@@ -72,8 +79,10 @@ const wrapCommand = (
       typeof result === "object" &&
       result !== null &&
       Symbol.asyncIterator in result
-    )
+    ) {
+      output.delegateStreaming();
       return result;
+    }
     return Promise.resolve(result).then(async (value: unknown) => {
       if (
         typeof value === "object" &&
@@ -102,16 +111,22 @@ const wrapCommand = (
 
 /** Preserve Incur output controls and stream JSON while framing failures. */
 export const createCliResultOutput = (
-  arguments_: readonly string[],
+  initialOptions: ParsedCliOutputArguments,
   destination: Writable,
 ): CliResultOutput | undefined => {
-  const options = parseCliOutputArguments(arguments_);
-  if (options.parseError || !validateCliOutputArguments(arguments_).ok)
+  let options = initialOptions;
+  if (
+    (options.parseError && options.format !== "jsonl") ||
+    !options.validation.ok
+  )
     return undefined;
-  const format = options.format as "json" | "jsonl" | "yaml" | "toon" | "md";
+  let format = options.format as "json" | "jsonl" | "yaml" | "toon" | "md";
   let handled = false;
   let failed = false;
   let error: AnalysisErrorProjection | undefined;
+  let streaming = false;
+  const sdkParts: string[] = [];
+  let sdkCompletion: Promise<void> | undefined;
   let completed:
     | {
         readonly metadata: CliResultOutputMetadata;
@@ -164,7 +179,10 @@ export const createCliResultOutput = (
       : error;
     // Recovery must remain actionable even when a token window/count was
     // requested. Do not apply those controls to this small typed failure.
-    const text = Formatter.format(document, format);
+    const text = formatCliOutput(
+      format === "jsonl" ? jsonLinesErrorRecord(document) : document,
+      format,
+    );
     handled = true;
     try {
       await writeOutputText(destination, `${text}\n`);
@@ -197,6 +215,55 @@ export const createCliResultOutput = (
     get error() {
       return error;
     },
+    begin(nextOptions) {
+      options = nextOptions;
+      format = options.format as typeof format;
+      handled = false;
+      failed = false;
+      error = undefined;
+      completed = undefined;
+      streaming = false;
+      sdkParts.length = 0;
+      sdkCompletion = undefined;
+    },
+    delegateStreaming() {
+      streaming = true;
+    },
+    captureSdkOutput(text) {
+      if (format !== "jsonl" || streaming || handled) return false;
+      // Incur already materializes one-shot documents. Retain references only;
+      // generator events bypass this buffer and remain incremental.
+      if (text.length > 0) sdkParts.push(text);
+      return true;
+    },
+    finishSdkOutput(exitCode) {
+      return (sdkCompletion ??= (async () => {
+        const parts = sdkParts.splice(0);
+        if (parts.length === 0) return;
+        try {
+          if (exitCode === 0) {
+            for (const part of parts) await writeOutputText(destination, part);
+          } else {
+            const text = parts.join("");
+            let result: unknown = text;
+            try {
+              result = JSON.parse(text);
+            } catch {
+              /* Preserve non-JSON SDK diagnostics verbatim. */
+            }
+            await writeJsonOutput(
+              jsonLinesErrorRecord(result),
+              destination,
+              "jsonl",
+            );
+          }
+        } catch (cause: unknown) {
+          handled = true;
+          failed = true;
+          throw cause;
+        }
+      })());
+    },
     write,
     recoverFormattingFailure,
   };
@@ -213,7 +280,7 @@ export const createCliResultOutput = (
       ? Filter.parse(options.filterOutput)
       : undefined;
     const operationFailure =
-      options.fullOutput || filterPaths !== undefined
+      format === "jsonl" || options.fullOutput || filterPaths !== undefined
         ? cliOperationFailurePayload(value)
         : undefined;
     const failure = options.fullOutput ? operationFailure : undefined;
@@ -226,6 +293,7 @@ export const createCliResultOutput = (
     if (
       operationFailure === undefined &&
       metadata.renderOutput === false &&
+      format !== "jsonl" &&
       !options.fullOutput &&
       !options.tokenCount
     )
@@ -247,9 +315,10 @@ export const createCliResultOutput = (
       !options.tokenCount &&
       format !== "json" &&
       format !== "jsonl";
-    // Delegate unfiltered successful non-JSON rendering to Incur. This boundary
-    // owns filtered successes, requested failure projections, and token windows.
+    // Delegate other human formats to Incur. Markdown stays here so admission
+    // and emitted table text use the same safe formatter.
     if (
+      format !== "md" &&
       format !== "json" &&
       format !== "jsonl" &&
       operationFailure === undefined &&
@@ -257,6 +326,26 @@ export const createCliResultOutput = (
       !ownsSuccessfulTokenWindow
     )
       return false;
+    if (format === "jsonl") {
+      handled = true;
+      try {
+        error = await writeCliJsonLines(
+          {
+            ...options,
+            source: value,
+            selected: filtered,
+            operationFailure,
+            command: metadata.command,
+            duration: metadata.duration,
+          },
+          destination,
+        );
+      } catch (cause: unknown) {
+        failed = true;
+        throw cause;
+      }
+      return true;
+    }
     if (options.tokenCount) {
       // Incur/tokenx materialize JSON. Measure its UTF-16 expansion before
       // allowing that allocation, independently of UTF-8 bytes. Other formats
@@ -269,7 +358,7 @@ export const createCliResultOutput = (
         typeof tokenValue !== "function" &&
         typeof tokenValue !== "symbol"
       ) {
-        if (format === "json" || format === "jsonl") {
+        if (format === "json") {
           for (const part of jsonOutputParts(
             tokenValue,
             format,
@@ -280,7 +369,7 @@ export const createCliResultOutput = (
         }
       }
       if (characters <= constants.MAX_STRING_LENGTH) {
-        const count = estimateTokenCount(Formatter.format(tokenValue, format));
+        const count = estimateTokenCount(formatCliOutput(tokenValue, format));
         handled = true;
         try {
           await writeOutputText(destination, `${count}\n`);
@@ -334,7 +423,7 @@ export const createCliResultOutput = (
         ? {}
         : filtered;
     if (ownsSuccessfulTokenWindow) {
-      const formatted = Formatter.format(filtered, format);
+      const formatted = formatCliOutput(filtered, format);
       const window = sliceTextByTokenWindow(
         formatted,
         options.tokenOffset ?? 0,
@@ -349,7 +438,7 @@ export const createCliResultOutput = (
         ? `${window.text}\n[truncated: showing tokens ${options.tokenOffset ?? 0}–${window.end} of ${window.total}]`
         : formatted;
       const outputDocument = options.fullOutput
-        ? Formatter.format(
+        ? formatCliOutput(
             window.truncated
               ? {
                   ok: true,
@@ -383,11 +472,19 @@ export const createCliResultOutput = (
     // Once writing starts, a failed destination must not receive a second
     // document from Incur's error formatter.
     const formattedText =
-      (operationFailure !== undefined || ownsFilteredOutput) &&
-      format !== "json" &&
-      format !== "jsonl"
-        ? Formatter.format(document, format)
+      format === "md" ||
+      ((operationFailure !== undefined || ownsFilteredOutput) &&
+        format !== "json")
+        ? formatCliOutput(document, format)
         : undefined;
+    if (
+      format === "md" &&
+      formattedText === "" &&
+      !options.fullOutput &&
+      !ownsFilteredOutput &&
+      operationFailure === undefined
+    )
+      return false;
     handled = true;
     try {
       if (formattedText !== undefined) {
@@ -422,7 +519,7 @@ const fullFailureEnvelope = (
 ): Readonly<Record<string, unknown>> => {
   if (tokenLimit === undefined && tokenOffset === undefined)
     return { ok: false, error: failure, meta };
-  const formatted = Formatter.format(failure, format);
+  const formatted = formatCliOutput(failure, format);
   const offset = tokenOffset ?? 0;
   const window = sliceTextByTokenWindow(formatted, offset, tokenLimit);
   if (!window.truncated) return { ok: false, error: failure, meta };
@@ -449,7 +546,12 @@ const applyCliOutputFilter = (value: unknown, paths: FilterPaths): unknown => {
     "key" in paths[0][0]
   ) {
     const key = paths[0][0].key;
-    if (typeof value !== "object" || value === null) return undefined;
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      !Object.hasOwn(value, key)
+    )
+      return undefined;
     const selected = (value as Record<string, unknown>)[key];
     return typeof selected !== "object" || selected === null
       ? selected
@@ -470,31 +572,32 @@ const projectObjectPaths = (value: unknown, paths: FilterPaths): unknown => {
     byKey.set(segment.key, siblings);
   }
 
-  const result: Record<string, unknown> = {};
+  const result = new Map<string, unknown>();
   for (const key of [...byKey.keys()].sort()) {
     const siblings = byKey.get(key)!;
+    if (!Object.hasOwn(value, key)) continue;
     const child = (value as Record<string, unknown>)[key];
     if (child === undefined) continue;
     // Selecting a parent retains its complete original subtree and dominates
     // any narrower selections below it, independent of path order.
     if (siblings.some((path) => path.length === 0)) {
-      result[key] = child;
+      result.set(key, child);
       continue;
     }
     const slicePaths = siblings.filter(
       (path) => path[0] !== undefined && "start" in path[0],
     );
     if (slicePaths.length > 0 && Array.isArray(child)) {
-      result[key] = projectArraySlices(child, slicePaths);
+      result.set(key, projectArraySlices(child, slicePaths));
       continue;
     }
     const objectPaths = siblings.filter(
       (path) => path[0] !== undefined && "key" in path[0],
     );
     if (objectPaths.length > 0 && typeof child === "object" && child !== null)
-      result[key] = projectObjectPaths(child, objectPaths);
+      result.set(key, projectObjectPaths(child, objectPaths));
   }
-  return result;
+  return Object.fromEntries(result);
 };
 
 /** Union sliced rows by their original index, then emit them in source order. */

@@ -193,6 +193,14 @@ reported. Directory headers, entries, data entries and payloads retain original
 file offsets and lengths. Each opaque payload has its own SHA-256; code page and
 reserved data-entry fields are preserved.
 
+Every `directories[]` row retains its identity `path` and the matching incoming
+`entry_locations`: both are empty for the root, then contain the type and
+optionally the name. Empty branches keep these identities even when they have
+no payload leaves. Shared directory bytes produce a row for each incoming path,
+with the original directory range and each path's own entry locations. These
+rows are included in the metadata budget. A present empty root remains distinct
+from an absent resource data directory (`directory: null`, `directories: []`).
+
 RT_GROUP_ICON records expose original image descriptors and RT_ICON candidates.
 A reference resolves only when an icon with the same numeric ID and language
 exists. Missing references, other-language candidates and declared-size mismatch
@@ -341,13 +349,21 @@ count and SHA-256.
   report null for the newly added encoding fields. `version` is null for an
   unversioned symbol. A versioned
   symbol reports its GNU index, a name resolved from `.gnu.version_d` or
-  `.gnu.version_r`, and the `hidden` flag from `.gnu.version`. `"unknown"`
+  `.gnu.version_r`, the corresponding `name_bytes_base64` and
+  `name_utf8_decodable` facts, and the `hidden` flag from `.gnu.version`.
+  Version names use the same UTF-8-when-valid, otherwise byte-preserving
+  Latin-1 display mapping as symbol names; ELF does not declare either
+  string's text encoding. Older retained results report null for the added
+  version-name encoding fields. `"unknown"`
   means the symbol-version table could not be read. A hidden version is not
   the default version that a by-name `dlsym` lookup selects.
   Definition names take precedence when both tables name the same index.
 
 Unreadable names, out-of-range name ordinals and unreadable forwarders are
 listed in `issues`, their entries are not reported, and coverage is `partial`.
+PE export names are bounded null-terminated byte strings and may continue
+across adjacent file-backed section mappings when the virtual bytes are
+unambiguous. Gaps, zero-fill and conflicting mappings remain unreadable names.
 Unresolved symbol versions keep their rows: the version name is null when no
 definition or requirement names the index, and `version` is
 `"unknown"` when the version table cannot be read; coverage is likewise

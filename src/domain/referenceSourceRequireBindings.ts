@@ -1,11 +1,18 @@
 import * as t from "@babel/types";
+import { posix } from "node:path";
 
 import { semanticStaticPropertyKey } from "./javascript/javascriptAstValues.js";
+import { isUnmodifiedGlobalReference } from "./javascript/javascriptSemanticAmbientWrites.js";
 import {
   indexJavaScriptBindingsWithReceiversSteps,
   type JavaScriptReceiverIndex,
 } from "./javascript/javascriptSemanticAnalysis.js";
-import { semanticRequireLoaderAt } from "./javascript/javascriptSemanticRequireOrigin.js";
+import type { JavaScriptSemanticAnalysisState } from "./javascript/javascriptSemanticState.js";
+import {
+  semanticRequireCallAt,
+  semanticRequireLoaderAt,
+  type JavaScriptRequireCallFact,
+} from "./javascript/javascriptSemanticRequireOrigin.js";
 import {
   completeSemanticSteps,
   traverseJavaScriptAst,
@@ -15,11 +22,21 @@ import {
   type ParsedJavaScriptSource,
 } from "./javascript/javascriptSourceParser.js";
 
-/** Recover source dependencies using the shared loader and mutation owners. */
-export const unshadowedReferenceSourceRequireCalls = (
+export type ReferenceSourceRequireResolutionBase =
+  | "source-file"
+  | { readonly kind: "source-relative-file"; readonly path: string }
+  | "unknown";
+
+export interface ReferenceSourceRequireCall {
+  readonly arguments: JavaScriptRequireCallFact["arguments"];
+  readonly resolutionBase: ReferenceSourceRequireResolutionBase;
+}
+
+/** Identify exact calls through a source-owned Node loader and their resolver base. */
+export const referenceSourceRequireCalls = (
   file: Pick<ParsedJavaScriptSource, "program">,
   path: string,
-): ReadonlySet<t.CallExpression> => {
+): ReadonlyMap<t.CallExpression, ReferenceSourceRequireCall> => {
   // Unmarked paths depend on package scope or compiler options. Preserve their
   // candidate CommonJS edges; explicit module paths have no wrapper loader.
   const wrapperMode = commonJsWrapperMode(path);
@@ -33,11 +50,13 @@ export const unshadowedReferenceSourceRequireCalls = (
   const candidates: {
     readonly call: t.CallExpression;
     readonly identifier: t.Identifier;
+    readonly arguments: JavaScriptRequireCallFact["arguments"];
+    readonly resolutionBase: ReferenceSourceRequireResolutionBase;
   }[] = [];
   traverseJavaScriptAst(file.program, {
     enter: (node) => {
       if (!t.isCallExpression(node)) return;
-      const identifier = requireCalleeIdentifier(node.callee);
+      const identifier = callReceiverIdentifier(node.callee);
       if (identifier === undefined) return;
       let fact = semanticRequireLoaderAt(node, index.bindings, factoryBindings);
       if (fact === "create-require") {
@@ -46,23 +65,111 @@ export const unshadowedReferenceSourceRequireCalls = (
         completeSemanticSteps(index.indexMemberMutationFactsSteps());
         fact = semanticRequireLoaderAt(node, index.bindings, factoryBindings);
       }
-      if (
-        fact === "create-require" ||
-        (fact === "commonjs-loader" && wrapperMode !== "absent")
-      )
-        candidates.push({ call: node, identifier });
+      const callFact = semanticRequireCallAt(
+        node,
+        index.bindings,
+        factoryBindings,
+      );
+      if (callFact === undefined || callFact.loader === "local") return;
+      if (fact !== "create-require" && fact !== "commonjs-loader") return;
+      if (fact === "commonjs-loader" && wrapperMode === "absent") return;
+      const sourceRelativePath = callFact.sourceRelativePath;
+      const normalizedSourceRelativePath =
+        sourceRelativePath === undefined
+          ? undefined
+          : posix.normalize(
+              posix.join(posix.dirname(path), sourceRelativePath),
+            );
+      const base: ReferenceSourceRequireResolutionBase =
+        callFact.loader === "create-require"
+          ? sourceRelativePath === undefined
+            ? callFact.sourceRelative === true
+              ? "source-file"
+              : "unknown"
+            : normalizedSourceRelativePath === undefined ||
+                normalizedSourceRelativePath === ".." ||
+                normalizedSourceRelativePath.startsWith("../")
+              ? "unknown"
+              : normalizedSourceRelativePath === path
+                ? "source-file"
+                : {
+                    kind: "source-relative-file",
+                    path: normalizedSourceRelativePath,
+                  }
+          : fact === "commonjs-loader" && callFact.loader === "commonjs-loader"
+            ? "source-file"
+            : "unknown";
+      const searchBase = requireResolveSearchBase(
+        node,
+        callFact.arguments,
+        index.bindings,
+        base,
+        wrapperMode === "present",
+      );
+      candidates.push({
+        call: node,
+        identifier,
+        arguments: callFact.arguments,
+        resolutionBase: searchBase,
+      });
     },
   });
   if (candidates.some(({ call }) => !t.isIdentifier(call.callee)))
     completeSemanticSteps(index.indexMemberMutationFactsSteps());
-  return new Set(
-    candidates
-      .filter(
-        ({ call, identifier }) =>
-          t.isIdentifier(call.callee) ||
-          !hasPriorMemberMutation(index, call, identifier),
-      )
-      .map(({ call }) => call),
+  return new Map(
+    candidates.map(
+      ({ call, identifier, arguments: callArguments, resolutionBase }) =>
+        [
+          call,
+          {
+            arguments: callArguments,
+            resolutionBase:
+              !t.isIdentifier(call.callee) &&
+              hasPriorMemberMutation(index, call, identifier)
+                ? "unknown"
+                : resolutionBase,
+          },
+        ] as const,
+    ),
+  );
+};
+
+/** `require.resolve` options replace the default search paths unless exact current-directory paths are supplied. */
+const requireResolveSearchBase = (
+  call: t.CallExpression,
+  callArguments: JavaScriptRequireCallFact["arguments"],
+  bindings: JavaScriptSemanticAnalysisState,
+  loaderBase: ReferenceSourceRequireResolutionBase,
+  hasCommonJsWrapper: boolean,
+): ReferenceSourceRequireResolutionBase => {
+  const arguments_ = callArguments ?? [];
+  if (!isRequireResolveCall(call) || arguments_.length < 2) return loaderBase;
+  if (arguments_.length !== 2) return "unknown";
+  const options = t.isExpression(arguments_[1]) ? arguments_[1] : undefined;
+  if (options === undefined || !t.isObjectExpression(options)) return "unknown";
+  if (options.properties.length === 0) return loaderBase;
+  if (options.properties.length !== 1) return "unknown";
+  const property = options.properties[0];
+  if (!t.isObjectProperty(property)) return "unknown";
+  if (semanticStaticPropertyKey(property.key, property.computed) !== "paths")
+    return "unknown";
+  const value = t.isExpression(property.value) ? property.value : undefined;
+  if (!t.isArrayExpression(value) || value.elements.length !== 1)
+    return "unknown";
+  const directory = value.elements[0];
+  return hasCommonJsWrapper &&
+    t.isIdentifier(directory, { name: "__dirname" }) &&
+    isUnmodifiedGlobalReference(directory, bindings, "__dirname")
+    ? "source-file"
+    : "unknown";
+};
+
+const isRequireResolveCall = (call: t.CallExpression): boolean => {
+  const callee = call.callee;
+  if (!t.isMemberExpression(callee) && !t.isOptionalMemberExpression(callee))
+    return false;
+  return (
+    semanticStaticPropertyKey(callee.property, callee.computed) === "resolve"
   );
 };
 
@@ -97,23 +204,14 @@ const hasPriorMemberMutation = (
   );
 };
 
-const requireCalleeIdentifier = (
+const callReceiverIdentifier = (
   callee: t.Node | null | undefined,
 ): t.Identifier | undefined => {
-  if (t.isIdentifier(callee, { name: "require" })) return callee;
+  if (t.isIdentifier(callee)) return callee;
   if (
-    !t.isMemberExpression(callee) ||
-    !t.isIdentifier(callee.object, { name: "require" }) ||
-    ((!t.isIdentifier(callee.property) || callee.computed) &&
-      !t.isStringLiteral(callee.property))
+    (t.isMemberExpression(callee) || t.isOptionalMemberExpression(callee)) &&
+    t.isIdentifier(callee.object)
   )
-    return undefined;
-  const propertyName = t.isIdentifier(callee.property)
-    ? callee.property.name
-    : t.isStringLiteral(callee.property)
-      ? callee.property.value
-      : undefined;
-  return propertyName === "resolve" || propertyName === "main"
-    ? callee.object
-    : undefined;
+    return callee.object;
+  return undefined;
 };

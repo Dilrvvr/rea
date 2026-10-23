@@ -168,6 +168,20 @@ Vitest worker limits do not bound subprocesses launched within a test. Bound
 those batches separately so repeated CLI validation cannot oversubscribe the
 runner. Preserve simultaneous launches where concurrency is itself under test.
 
+Coordinate expensive checks across agents sharing a host. If a test unexpectedly
+consumes heavy CPU, stop its owned process family, retain its log and revision,
+and profile a bounded representative case before retrying. Separate production
+work from fixture generation, schema compilation, subprocess startup and cleanup.
+Choose elapsed, CPU and process-family memory limits before the run; a worker
+count or test timeout alone does not enforce those limits.
+
+Remove demonstrated repeated work while preserving distinct assertions and
+resource ownership. Share immutable fixture preparation where safe; keep fresh
+sessions when lifecycle or concurrency is the behavior under test. Compare the
+same completed workload before and after, report cache state and measurement
+limits, and record interrupted runs separately from passes. Increasing a timeout
+does not explain a CPU regression.
+
 Build/documentation writers hold checkout-local output locks. Tests do not
 hold a broad command lock; `check:pr` finishes tests before document validation.
 Turbo caches deterministic preparation and static checks, but `test:run` always
@@ -276,6 +290,13 @@ For comparison normalization, include a legitimate equivalent pair and a
 distinct pair that would collapse if representation tags or scope were lost.
 For learned identifiers, cover conflicting pairs and reused values in different
 collections; mappings must remain one-to-one within their declared scope.
+
+For coverage propagation, compare the same returned rows under complete and
+incomplete examination. If a row exists on the left but is missing from a fully
+examined compatible right inventory, removal can be established. If the right
+side examined only eight of ten applicable records, or returns only one page,
+the same missing row remains unknown unless separate evidence proves absence.
+Assert the structured coverage and comparison status as well as the explanation.
 
 For format compatibility, identify the producer revision that establishes each
 rule. Include an accepted boundary case beside the rejected case so a stricter
@@ -1752,8 +1773,10 @@ the running Node engine's single-string limit. Shared input leaves keep the
 fixture's graph small; the verifier writes one temporary output file, checks its
 complete byte count and an independent digest, then removes it. It requires only
 Node and the built REA runtime, with space for the output plus a 1 GiB reserve.
-Run `npm run verify:javascript:output -- jsonl` for compact JSONL coverage. This
-opt-in lane is separate from routine tests and the canonical hash check
+Run `npm run verify:javascript:output -- jsonl` for compact JSONL coverage. Its
+row collection must match independent row and final-metadata byte/digest goldens;
+its token count is checked against the actual file one line at a time, even when
+the complete export exceeds the engine string limit. This opt-in lane is separate from routine tests and the canonical hash check
 `npm run verify:javascript:digests`. It verifies serialization rather than an
 arbitrary third-party application's parsing cost or MCP client capacity.
 

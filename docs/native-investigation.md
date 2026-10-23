@@ -352,6 +352,12 @@ Available CPU type, subtype/capability bits, byte range, and alignment remain
 checked against the source bytes. Inventory records source ranges and hashes, and
 extraction copies those ranges without running the target. This does not
 expand any analysis provider's supported architectures.
+Apple lipo's hidden ARM64 compatibility row is retained separately from the
+raw `nfat_arch` count and admitted only from its extra FAT table slot when its
+in-range Mach-O header matches the row. `list_architectures` preserves the
+per-row `hidden` marker from lipo output. Mach-O image and Electron fuse
+inspection include the row in architecture selection while retaining that
+marker in their reported slices.
 
 `inspect_plist.format` describes the selected source, not plutil's conversion
 format. Sources explicitly identified as XML, binary or JSON retain those
@@ -427,9 +433,16 @@ complete observation.
   its outcome. Paths outside the analyzed root, including shared-cache system
   libraries, stay undetermined. See
   [Apple application analysis](apple-application-analysis.md#dylib-load-resolution).
+  Executable-root discovery preserves traversal uncertainty, including
+  undecodable filenames and skipped symlinks, as partial coverage. Known
+  executable roots remain available; unexamined names and symlink targets
+  cannot establish an empty root set or the absence of other roots.
 - `inspect_asset_catalog` / `rea inspect-asset-catalog <app>` reads compiled
   `Assets.car` metadata through macOS `assetutil --info`. Catalog digests, raw
   rendition fields, pagination and exact UI resource-name matches are returned.
+  `inventory_coverage` describes traversal of source entries and remains
+  `unknown` when the reader cannot represent a filename. Represented symlinks
+  are inventoried but their targets remain uninspected, with a limitation.
   Image extraction and undocumented rendition interpretation are unsupported.
 - `inspect_keyed_archive` / `rea inspect-keyed-archive <plist>` reads XML or
   binary Foundation keyed archives without instantiating classes. For an active
@@ -447,6 +460,19 @@ complete observation.
   emits no bytes. Character references retain their source spelling for data
   decoding. Non-ASCII content, child markup and self-closing `<data/>` are format
   failures; explicit `<data></data>` represents empty data.
+  Each XML dictionary key must have a following value element; a final key
+  without one is malformed. An explicit empty string remains a value.
+  Binary UID payloads may use nonminimal byte widths. REA normalizes them only
+  in a private decoder copy; archive digests still identify the original bytes.
+  Positive binary-plist offset and object-reference table widths are read from
+  the source; nonstandard widths are normalized only in that private copy for
+  the pinned decoder. [Foundation's table checks](https://github.com/swiftlang/swift-corelibs-foundation/blob/swift-6.2.3-RELEASE/Sources/CoreFoundation/CFBinaryPList.c#L759-L789)
+  accept positive widths subject to extent/reference bounds, and its
+  [sized-integer reader](https://github.com/swiftlang/swift-corelibs-foundation/blob/swift-6.2.3-RELEASE/Sources/CoreFoundation/CFBinaryPList.c#L707-L730)
+  handles non-power sizes. Widths over eight bytes follow its unsigned 64-bit
+  accumulator semantics.
+  UID values above JavaScript's exact integer range return an unsupported-target
+  outcome instead of rounded reference identities.
   UID 0 cannot distinguish conditional nil from ordinary nil. Limits are
   64 MiB of input, 200,000 objects/references and 128 nesting levels.
   XML dictionary entries decoded as `__proto__` are omitted with an explicit
@@ -490,6 +516,13 @@ complete observation.
   Archives beyond either aggregate budget are omitted with their paths and an
   explicitly partial `archive_decode` facet; previously decoded documents and
   their identities remain available.
+  The same facet is partial when source traversal cannot represent a filename
+  or an archive-shaped symlink was skipped. Unknown filename coverage has no
+  invented document count; known skipped nib and storyboard links are counted
+  as omitted. A readable empty bundle can report complete zero-document
+  coverage. Source I/O and identity failures retain their acquisition error
+  instead of being labeled invalid archive content. Rejected plist decodes
+  release their representation reservation for later documents.
 - `inspect_native_dispatch_metadata` /
   `rea inspect-native-dispatch-metadata <app-or-binary>` prefers a validated macOS Mach-O byte reader. It decodes
   64-bit little-endian Objective-C class/metaclass records, superclass pointers,
@@ -551,7 +584,8 @@ complete observation.
   So an external superclass resolves from its `_OBJC_CLASS_$_` bind (for
   example `NSObject`). The `pointer_fixups` coverage facet names the mechanism.
   Class properties preserve each encoded attribute as a raw `{name, value}`
-  pair, for example `{ name: "N", value: "" }`, and report atomicity on the
+  pair, including commas inside C++ template arguments in the `T` type, for
+  example `{ name: "N", value: "" }`, and report atomicity on the
   property: `N` means `nonatomic`; a complete typed attribute string without
   `N` means the Objective-C default `atomic`;
   missing or incomplete attribute metadata leaves `atomicity` and any
@@ -760,6 +794,15 @@ unresolved runtime/value semantics remain visible in results.
 
 ## Interface Builder hierarchy coverage
 
+Bundle archive selection preserves directory traversal uncertainty, including
+filenames that cannot be decoded as UTF-8. These names are not guessed or
+counted as known archive omissions. Recognized symlinked `.nib` entries are
+not followed; they retain their paths and reader limitations as counted archive
+omissions. Either gap makes `archive_decode` partial and the graph truncated
+while preserving decoded documents. Its `examined` count remains actual decode
+attempts, and asset-catalog UI joins retain their existing incomplete-graph
+qualification.
+
 A document's `hierarchy_complete` flag follows its own hierarchy coverage.
 If graph limits omit a hierarchy source or destination, or prevent a hierarchy
 edge or traversal from being retained, that document reports partial hierarchy
@@ -808,8 +851,31 @@ attributes; exact and ambiguous projection counts cover emitted attribute values
 Integral reals stay numbers, and ambiguous or incompletely observed values retain
 explicit precision limitations. Before plist decoding, the existing aggregate
 decode budget reserves estimated room for number metadata and attribute
-projection; these estimates are not a hard process-memory bound. Native
-NIBArchive decoding is unchanged by this plist-specific representation.
+projection; these estimates are not a hard process-memory bound. Keyed-archive
+object identities always come from their original `$objects` table indices.
+Authored `objectID`, `object-id`, `archiveUID` and `id` fields remain ordinary
+object data and do not change inventory, reference, connector or hierarchy
+identity. This changes keyed-archive graph IDs that previously used authored
+`objectID` or `object-id` values: `interface_builder_object_id` and linked node
+IDs now use the decimal table UID, while the authored values remain in attributes.
+For example, an authored `objectID: "2"` on table entry 1 now identifies object
+`"1"`; its graph node ends in `object:["1"]`. Nonkeyed ibtool dictionary IDs
+and native NIBArchive IDs keep their existing source-specific meaning.
+Connector endpoints require encoded UID references to archived objects; strings
+and dictionaries that merely resemble resolved reference stubs do not establish
+identity. Inline hierarchy dictionaries have no table identity and count as
+omitted references, while independently referenced children remain available.
+The UID identity rule follows the
+[Foundation unarchiver's table lookup](https://github.com/swiftlang/swift-corelibs-foundation/blob/28249ced079d8e7ec03b821c039bf9868738c3fc/Sources/Foundation/NSKeyedUnarchiver.swift#L213-L223).
+UIKit keyed nibs select their explicitly named
+`UINibTopLevelObjectsKey` collection; generic `root` is used when that named key
+is absent. Unsupported or dangling named roots remain incomplete rather than
+falling back to another collection. The key spelling follows the independent
+[WinObjC UINib reader](https://github.com/microsoft/WinObjC/blob/94f6b5bfdc09d945e30607b56124b6f94a5b9d7b/Frameworks/UIKit/UINib.mm#L104-L109).
+
+NIBArchive float32 and float64 values retain non-finite values and negative zero
+through projection as the same typed real wrappers used for plist values; per-document limitations
+count those values. NIBArchive nil remains JSON null.
 
 Dates are reported as `{ "$plist_type": "date", "iso8601": "<timestamp>" }`.
 XML dates require a complete UTC spelling with fixed two-digit month, day and

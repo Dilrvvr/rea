@@ -1,3 +1,4 @@
+import { isSelectedRegularFileError } from "../../filesystem/RegularFile.js";
 import { fixedNativeAllowance } from "../../domain/native/nativeDeadlines.js";
 import { ArtifactReaderFailure } from "../../artifacts/ArtifactReader.js";
 import { readStableArtifact } from "../../artifacts/readStableArtifact.js";
@@ -25,7 +26,7 @@ import {
 } from "../../domain/native/peResources.js";
 import { err, ok } from "../../domain/result.js";
 import { ProviderCleanupError } from "../../domain/providerCleanupError.js";
-import { PE_RESOURCES_PROVIDER } from "../../application/InvestigationProviders.js";
+import { PE_RESOURCES_PROVIDER } from "../../domain/investigationProviders.js";
 import {
   parsePeResources,
   PE_RESOURCE_METADATA_BYTES,
@@ -172,7 +173,7 @@ const peResourcesFailurePrimary = (
       return new AnalysisAccessDeniedError(operation, input.path, cause.code, {
         cause,
       });
-    if (cause.code === "ENOENT" || cause.code === "ENOTDIR")
+    if (isSelectedRegularFileError(cause))
       return new AnalysisInputError(operation, { cause }, [
         {
           path: ["path"],

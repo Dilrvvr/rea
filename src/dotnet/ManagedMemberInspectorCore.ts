@@ -60,6 +60,13 @@ export interface TypeRange {
   readonly methodEnd: number | null;
 }
 
+/** One TypeDef row's names and coordinates, including unreadable declarations. */
+interface TypeDefinition extends TypeRange {
+  readonly row: number;
+  readonly name: string | undefined;
+  readonly namespace: string | undefined;
+}
+
 /**
  * Name and declaring type of a field, method, member reference, or method
  * specification, keyed by its token so edges resolve any target uniformly.
@@ -76,7 +83,36 @@ export interface MemberCore {
    * MethodDef outside the type selection.
    */
   readonly genericArity?: number | null;
+  /** Nominal declaring type, name and decoded signature; never runtime binding. */
+  readonly identitySha256?: string | null;
 }
+
+export const memberTargetIdentity = (
+  name: string,
+  declaringToken: string | null,
+  signature: ManagedSignature,
+  typeName: SignatureTypeName,
+): string | null => {
+  if (
+    declaringToken === null ||
+    signature.resolved_sha256 === null ||
+    signature.parse_status !== "decoded"
+  )
+    return null;
+  const table = Number.parseInt(declaringToken.slice(2, 4), 16);
+  if (table !== 1 && table !== 2) return null;
+  const owner = typeName(
+    Number.parseInt(declaringToken.slice(4), 16) * 4 + Number(table === 1),
+  );
+  return owner === null
+    ? null
+    : createHash("sha256")
+        .update("managed-member-nominal-v1\0")
+        .update(owner)
+        .update(Buffer.from(signature.resolved_sha256, "hex"))
+        .update(name)
+        .digest("hex");
+};
 
 export interface ParsedInstruction {
   readonly offset: number;
@@ -109,36 +145,38 @@ const rowRange = (
 export const fullName = (namespace: string, name: string): string =>
   namespace.length === 0 ? name : `${namespace}.${name}`;
 
-const readTypeRange = (
+const readTypeDefinition = (
   bytes: Buffer,
   layout: ManagedMetadataLayout,
   row: number,
   issues: ManagedParseIssue[],
   memberLists: TypeMemberListFacts,
-): TypeRange => {
+): TypeDefinition => {
   const cursor = metadataRowCursor(bytes, layout, 2, row);
   cursor.readUInt32();
   const nameIndex = cursor.readIndex(layout.stringIndexSize);
   const namespaceIndex = cursor.readIndex(layout.stringIndexSize);
-  const declaredName =
-    readManagedValue(
-      () =>
-        fullName(
-          readMetadataString(
-            bytes,
-            layout,
-            namespaceIndex,
-            layout.strings.size,
-          ),
-          readMetadataString(bytes, layout, nameIndex, layout.strings.size),
-        ),
-      issues,
-    ) ?? null;
+  // Keep both independent name failures, but decode each heap coordinate once.
+  const namespace = readManagedValue(
+    () =>
+      readMetadataString(bytes, layout, namespaceIndex, layout.strings.size),
+    issues,
+  );
+  const name = readManagedValue(
+    () => readMetadataString(bytes, layout, nameIndex, layout.strings.size),
+    issues,
+  );
   cursor.readIndex(layout.codedIndexSize("TypeDefOrRef"));
   const current = memberLists.entries[row - 1];
   return {
+    row,
+    name,
+    namespace,
     token: metadataToken(2, row),
-    fullName: declaredName,
+    fullName:
+      namespace === undefined || name === undefined
+        ? null
+        : fullName(namespace, name),
     fieldStart: current?.field.start.value ?? null,
     fieldEnd: current?.field.end ?? null,
     methodStart: current?.method.start.value ?? null,
@@ -146,18 +184,20 @@ const readTypeRange = (
   };
 };
 
-export const typeRanges = (
+export const readTypeDefinitions = (
   bytes: Buffer,
   layout: ManagedMetadataLayout,
   issues: ManagedParseIssue[],
   memberLists: TypeMemberListFacts,
-): readonly TypeRange[] => {
+): readonly TypeDefinition[] => {
   issues.push(...memberLists.issues);
   const typeTable = layout.table(2);
-  const ranges: TypeRange[] = [];
+  const definitions: TypeDefinition[] = [];
   for (let row = 1; row <= (typeTable?.rowCount ?? 0); row += 1)
-    ranges.push(readTypeRange(bytes, layout, row, issues, memberLists));
-  return ranges;
+    definitions.push(
+      readTypeDefinition(bytes, layout, row, issues, memberLists),
+    );
+  return definitions;
 };
 
 /**
@@ -167,91 +207,82 @@ export const typeRanges = (
 export const parseTypes = (
   bytes: Buffer,
   layout: ManagedMetadataLayout,
-  ranges: readonly TypeRange[],
+  definitions: readonly TypeDefinition[],
 ): {
   readonly types: readonly ManagedType[];
   readonly issues: readonly ManagedParseIssue[];
   readonly nesting: ManagedTypeNesting;
 } => {
-  const typeTable = layout.table(2);
   const fields = memberListTable(layout, 4);
   const methods = memberListTable(layout, 6);
   const items: ManagedType[] = [];
   const issues: ManagedParseIssue[] = [];
   const nesting = readManagedTypeNesting(bytes, layout, issues);
-  for (let row = 1; row <= (typeTable?.rowCount ?? 0); row += 1) {
-    readManagedValue(() => {
-      const cursor = metadataRowCursor(bytes, layout, 2, row);
-      const flags = cursor.readUInt32();
-      const name = readMetadataString(
-        bytes,
-        layout,
-        cursor.readIndex(layout.stringIndexSize),
-        layout.strings.size,
-      );
-      const namespace = readMetadataString(
-        bytes,
-        layout,
-        cursor.readIndex(layout.stringIndexSize),
-        layout.strings.size,
-      );
-      const extendsOffset = cursor.offset;
-      const extendsRaw = cursor.readIndex(
-        layout.codedIndexSize("TypeDefOrRef"),
-      );
-      const currentRange = ranges[row - 1] ?? null;
-      const fieldRange = rowRange(
-        fields,
-        currentRange?.fieldStart ?? null,
-        currentRange?.fieldEnd ?? null,
-      );
-      const methodRange = rowRange(
-        methods,
-        currentRange?.methodStart ?? null,
-        currentRange?.methodEnd ?? null,
-      );
-      const extendsReason = metadataCodedTokenInvalidReason(
+  for (const definition of definitions) {
+    const { row, name, namespace, token } = definition;
+    if (
+      name === undefined ||
+      namespace === undefined ||
+      definition.fullName === null
+    )
+      continue;
+    const cursor = metadataRowCursor(bytes, layout, 2, row);
+    const flags = cursor.readUInt32();
+    cursor.readIndex(layout.stringIndexSize);
+    cursor.readIndex(layout.stringIndexSize);
+    const extendsOffset = cursor.offset;
+    const extendsRaw = cursor.readIndex(layout.codedIndexSize("TypeDefOrRef"));
+    const fieldRange = rowRange(
+      fields,
+      definition.fieldStart,
+      definition.fieldEnd,
+    );
+    const methodRange = rowRange(
+      methods,
+      definition.methodStart,
+      definition.methodEnd,
+    );
+    const extendsReason = metadataCodedTokenInvalidReason(
+      extendsRaw,
+      2,
+      [2, 1, 27],
+      layout.rowCounts,
+    );
+    if (extendsReason !== null)
+      issues.push({
+        code: "invalid-row",
+        scope: `metadata.TypeDef:${token}`,
+        offset: extendsOffset,
+        detail: `TypeDef Extends coded index 0x${extendsRaw.toString(16)} is invalid: ${extendsReason}`,
+      });
+    const enclosingRow = nesting.enclosing.get(row);
+    items.push({
+      token,
+      row_offset: cursor.start,
+      namespace,
+      name,
+      full_name: definition.fullName,
+      flags,
+      extends_token: metadataCodedToken(
         extendsRaw,
         2,
         [2, 1, 27],
         layout.rowCounts,
-      );
-      if (extendsReason !== null)
-        issues.push({
-          code: "invalid-row",
-          scope: `metadata.TypeDef:${metadataToken(2, row)}`,
-          offset: extendsOffset,
-          detail: `TypeDef Extends coded index 0x${extendsRaw.toString(16)} is invalid: ${extendsReason}`,
-        });
-      const enclosingRow = nesting.enclosing.get(row);
-      items.push({
-        token: metadataToken(2, row),
-        row_offset: cursor.start,
-        namespace,
-        name,
-        full_name: fullName(namespace, name),
-        flags,
-        extends_token: metadataCodedToken(
-          extendsRaw,
-          2,
-          [2, 1, 27],
-          layout.rowCounts,
-        ),
-        enclosing_type_token:
-          enclosingRow === undefined ? null : metadataToken(2, enclosingRow),
-        name_sha256: null,
-        field_list: {
-          first_row: fieldRange.first,
-          last_row: fieldRange.last,
-          count: fieldRange.count,
-        },
-        method_list: {
-          first_row: methodRange.first,
-          last_row: methodRange.last,
-          count: methodRange.count,
-        },
-      });
-    }, issues);
+      ),
+      enclosing_type_token:
+        enclosingRow === undefined ? null : metadataToken(2, enclosingRow),
+      name_sha256: null,
+      field_list: {
+        first_row: fieldRange.first,
+        last_row: fieldRange.last,
+        count: fieldRange.count,
+      },
+      method_list: {
+        first_row: methodRange.first,
+        last_row: methodRange.last,
+        count: methodRange.count,
+      },
+    });
   }
   return { types: items, issues, nesting };
 };
@@ -345,6 +376,8 @@ type TypeContinuation =
       // Function pointer items are a RetType then Params; generic
       // arguments are Types.
       readonly signatureItems: boolean;
+      vararg?: boolean;
+      sentinelSeen?: boolean;
       readonly render: (items: readonly string[]) => string;
     };
 
@@ -546,6 +579,36 @@ const readTypeSignature = (
     const kind = blob[cursor];
     if (kind === undefined)
       return malformedSignature("truncated type signature", cursor);
+    if (kind === 0x41) {
+      const signature = stack.at(-1);
+      if (signature?.kind !== "list" || !signature.signatureItems)
+        throw managedFailure(
+          "unsupported-signature",
+          "signature",
+          "unsupported element type 0x41",
+          cursor,
+        );
+      if (!signature.vararg)
+        throw managedFailure(
+          "unsupported-signature",
+          "signature",
+          "unsupported element type 0x41",
+          cursor,
+        );
+      if (signature.sentinelSeen || signature.remaining === 0)
+        return malformedSignature(
+          "VARARG function pointer has an invalid sentinel position",
+          cursor,
+        );
+      signature.sentinelSeen = true;
+      cursor += 1;
+      if (blob[cursor] === undefined || blob[cursor] === 0x41)
+        return malformedSignature(
+          "VARARG function pointer has adjacent sentinels",
+          cursor,
+        );
+      continue;
+    }
     const positions = POSITION_ELEMENTS.get(kind);
     if (
       positions !== undefined &&
@@ -658,6 +721,8 @@ const readTypeSignature = (
         remaining: header.parameterCount + 1,
         items: [],
         signatureItems: true,
+        vararg: (header.first & 0x0f) === 5,
+        sentinelSeen: false,
         render: ([returnType, ...parameters]) =>
           `fnptr[${head}](${parameters.join(",")})->${returnType ?? ""}`,
       });
@@ -768,7 +833,7 @@ const callingConvention = (value: number): string => {
  * rendered types. A malformed or unsupported blob throws invalid-blob or
  * unsupported-signature under the owning row, so coverage records it.
  */
-export const specSignature = (
+export const specSignatureFacts = (
   layout: ManagedMetadataLayout,
   blob: Buffer,
   owner: {
@@ -776,7 +841,11 @@ export const specSignature = (
     readonly scope: string;
     readonly offset: number;
   },
-): readonly string[] => {
+  typeName?: SignatureTypeName,
+): {
+  readonly types: readonly string[];
+  readonly resolvedSha256: string | null;
+} => {
   const budget = managedDecodeBudget(layout);
   // Rendering is transient, so charge it as member signatures are charged.
   budget.admitTransient(blob.length * 256, owner.offset);
@@ -793,15 +862,25 @@ export const specSignature = (
       cursor = header.next;
     }
     const types: string[] = [];
+    const operands: TypeOperand[] = [];
     // Each Type consumes at least one byte, so a false count fails on truncation.
     for (let index = 0; index < count; index += 1) {
-      const type = readTypeSignature(blob, cursor, "type", { layout });
+      const type = readTypeSignature(blob, cursor, "type", {
+        layout,
+        operands,
+      });
       types.push(type.value);
       cursor = type.next;
     }
     if (cursor !== blob.length)
       malformedSignature("Trailing signature data", cursor);
-    return types;
+    return {
+      types,
+      resolvedSha256:
+        typeName === undefined
+          ? null
+          : resolvedSha256(blob, operands, typeName),
+    };
   } catch (cause: unknown) {
     if (
       !(cause instanceof ManagedReaderFailure) ||
@@ -871,7 +950,19 @@ const decodeSignature = (
     });
     let offset = returnType.next;
     const parameters: string[] = [];
+    let sentinelSeen = false;
     for (let index = 0; index < header.parameterCount; index += 1) {
+      if (blob[offset] === 0x41 && (first & 0x0f) === 5) {
+        if (sentinelSeen)
+          malformedSignature(
+            "VARARG signature has an invalid sentinel position",
+            offset,
+          );
+        sentinelSeen = true;
+        offset += 1;
+        if (blob[offset] === undefined || blob[offset] === 0x41)
+          malformedSignature("VARARG signature has adjacent sentinels", offset);
+      }
       const parameter = readTypeSignature(blob, offset, "parameter", {
         operands,
         ...(layout === undefined ? {} : { layout }),
@@ -927,7 +1018,10 @@ export const methodGenericArity = (
   blob: Buffer,
 ): number | null => {
   const budget = managedDecodeBudget(layout);
-  budget.admitTransient(blob.length * 256, layout.blob.offset);
+  budget.admitTransient(
+    blob.length * 256,
+    layout.blob?.offset ?? layout.rootOffset,
+  );
   try {
     return signatureGenericArity(decodeSignature(blob));
   } finally {

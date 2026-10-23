@@ -26,7 +26,10 @@ import {
   unwrapJavaScriptExpression,
 } from "./javascriptAstValues.js";
 import { semanticPropertyPathKeyMatches } from "./javascriptSemanticPropertyPaths.js";
-import { stringValue } from "./javascriptStaticAnalysisHelpers.js";
+import {
+  staticSourceRelativeUrlPath,
+  stringValue,
+} from "./javascriptStaticAnalysisHelpers.js";
 import {
   semanticEffectTiming,
   semanticBindingAtRead,
@@ -46,7 +49,10 @@ import {
   type SemanticAliasSelectionPath,
 } from "./javascriptSemanticAliasSelections.js";
 import { SEMANTIC_ALIAS_SELECTION_LIMIT } from "./javascriptSemanticResourceLimits.js";
-import { isUnmodifiedImportMetaUrl } from "./javascriptSemanticAmbientWrites.js";
+import {
+  isUnmodifiedGlobalReference,
+  isUnmodifiedImportMetaUrl,
+} from "./javascriptSemanticAmbientWrites.js";
 import { semanticReferenceSourcesInactive } from "./javascriptSemanticReferenceSources.js";
 
 export interface JavaScriptRequireOrigin {
@@ -153,6 +159,8 @@ const requireLoaderValueAt = (
     return semanticBindingHasPriorValueWrite(node, binding, state)
       ? "unknown"
       : "factory-loader";
+  if (binding !== undefined && isSemanticCreateRequireBinding(binding, state))
+    return "create-require";
   if (loader.name !== "require") return "local";
   if (binding === undefined) {
     if (semanticResolutionBlocked(state, loader, "require")) return "unknown";
@@ -189,7 +197,6 @@ const requireLoaderValueAt = (
     !semanticBindingHasPriorValueWrite(node, wrapperBinding, state)
   )
     return commonJsLoaderAt(node, state);
-  if (isSemanticCreateRequireBinding(binding, state)) return "create-require";
   const initializer = semanticStableInitializer(binding, state)?.node;
   if (
     (binding.kind === "function" || binding.kind === "class") &&
@@ -266,7 +273,12 @@ const createRequireFactoryCallAt = (
   initializer: t.Node | undefined,
   state: JavaScriptSemanticAnalysisState,
   factoryBindingIds: ReadonlySet<string> = new Set(),
-): Pick<JavaScriptRequireCallFact, "loader" | "sourceRelative"> | undefined =>
+):
+  | Pick<
+      JavaScriptRequireCallFact,
+      "loader" | "sourceRelative" | "sourceRelativePath"
+    >
+  | undefined =>
   !t.isCallExpression(initializer)
     ? undefined
     : selectedRequireSourcesAt(
@@ -277,11 +289,41 @@ const createRequireFactoryCallAt = (
         "factory",
       );
 
+type SourceRelativeCreateRequireBase =
+  | { readonly kind: "source-file" }
+  | { readonly kind: "source-relative-file"; readonly path: string };
+
+const sourceRelativeCreateRequireBaseAt = (
+  value: t.Node | undefined,
+  state: JavaScriptSemanticAnalysisState,
+): SourceRelativeCreateRequireBase | undefined => {
+  if (value === undefined) return undefined;
+  if (isUnmodifiedImportMetaUrl(value, state)) return { kind: "source-file" };
+  if (!t.isNewExpression(value) || value.arguments.length !== 2)
+    return undefined;
+  const callee = unwrapJavaScriptExpression(value.callee).node;
+  if (
+    !t.isIdentifier(callee, { name: "URL" }) ||
+    !isUnmodifiedGlobalReference(callee, state, "URL") ||
+    !isUnmodifiedImportMetaUrl(
+      t.isNode(value.arguments[1]) ? value.arguments[1] : undefined,
+      state,
+    )
+  )
+    return undefined;
+  const urlPath = staticSourceRelativeUrlPath(value);
+  return urlPath === undefined ||
+    urlPath.directory ||
+    urlPath.path.startsWith("/")
+    ? undefined
+    : { kind: "source-relative-file", path: urlPath.path };
+};
+
 /** Eligibility for observable loader slots; an unknown factory is not invocation proof. */
 export const hasSemanticCreateRequireFactoryOrigin = (
   initializer: t.Node | undefined,
   state: JavaScriptSemanticAnalysisState,
-): initializer is t.CallExpression => {
+): boolean => {
   const factory = createRequireFactoryCallAt(initializer, state);
   return factory !== undefined && factory.loader !== "local";
 };
@@ -318,7 +360,12 @@ const selectedRequireSourcesAt = (
   state: JavaScriptSemanticAnalysisState,
   factoryBindingIds: ReadonlySet<string>,
   target: "loader" | "factory" = "loader",
-): Pick<JavaScriptRequireCallFact, "loader" | "sourceRelative"> | undefined => {
+):
+  | Pick<
+      JavaScriptRequireCallFact,
+      "loader" | "sourceRelative" | "sourceRelativePath"
+    >
+  | undefined => {
   const pending: ModuleObjectSource[] = [{ node: root, path: [] }];
   const seen = new WeakMap<t.Node, Set<string>>();
   let count = 0;
@@ -329,6 +376,7 @@ const selectedRequireSourcesAt = (
   let local = false;
   let nativeMemberAlternative = false;
   let sourceRelative = true;
+  let sourceRelativeBase: SourceRelativeCreateRequireBase | undefined;
   while (pending.length > 0) {
     const current = pending.pop()!;
     const node = unwrapJavaScriptExpression(current.node).node;
@@ -337,6 +385,11 @@ const selectedRequireSourcesAt = (
       semanticAliasSelectionChoices(current.path[0]!).every(
         (key) => key === "call" || key === "apply",
       );
+    const nativeGenericMember =
+      target === "loader" &&
+      genericMember &&
+      t.isIdentifier(node) &&
+      requireLoaderValueAt(node, node, state, factoryBindingIds) !== "local";
     const key = JSON.stringify([current.path, loaderSourceContextKey(current)]);
     const paths = seen.get(node) ?? new Set<string>();
     if (paths.has(key)) continue;
@@ -353,10 +406,6 @@ const selectedRequireSourcesAt = (
         ]),
       );
     } else if (t.isIdentifier(node)) {
-      if (target === "loader" && genericMember)
-        nativeMemberAlternative ||=
-          requireLoaderValueAt(node, node, state, factoryBindingIds) !==
-          "local";
       if (target === "loader" && current.path.length === 0) {
         const captured = requireLoaderValueAt(
           node,
@@ -407,6 +456,17 @@ const selectedRequireSourcesAt = (
         current.readAt ?? node,
         current.capturedSelections,
       );
+      if (nativeGenericMember)
+        nativeMemberAlternative ||=
+          facts === undefined ||
+          facts.sources.length === 0 ||
+          !facts.sources.every(({ node: source }) => {
+            const value = unwrapJavaScriptExpression(source).node;
+            return (
+              t.isFunctionExpression(value) ||
+              t.isArrowFunctionExpression(value)
+            );
+          });
       if (target === "factory" && binding.directOrigins.length > 0) {
         const native = binding.directOrigins.some((origin) =>
           isCreateRequireOrigin(origin, current.path),
@@ -514,10 +574,21 @@ const selectedRequireSourcesAt = (
                 selectedLoader !== "create-require");
             selectedLoader ??= "create-require";
             unknown ||= state.conditionallySkippedExpressions.has(node);
-            sourceRelative &&= isUnmodifiedImportMetaUrl(
+            const factoryBase = sourceRelativeCreateRequireBaseAt(
               node.arguments[0],
               state,
             );
+            if (factoryBase === undefined) sourceRelative = false;
+            else if (sourceRelativeBase === undefined)
+              sourceRelativeBase = factoryBase;
+            else if (
+              sourceRelativeBase.kind !== factoryBase.kind ||
+              (sourceRelativeBase.kind === "source-relative-file" &&
+                factoryBase.kind === "source-relative-file" &&
+                sourceRelativeBase.path !== factoryBase.path)
+            ) {
+              sourceRelative = false;
+            }
           }
         } else if (factory?.loader === "local") local = true;
         else unknown = true;
@@ -543,6 +614,12 @@ const selectedRequireSourcesAt = (
               ? (selectedLoader ?? "unknown")
               : "local",
         sourceRelative: found && sourceRelative && !unknown,
+        ...(found &&
+        !unknown &&
+        sourceRelative &&
+        sourceRelativeBase?.kind === "source-relative-file"
+          ? { sourceRelativePath: sourceRelativeBase.path }
+          : {}),
       }
     : undefined;
 };
@@ -577,11 +654,14 @@ const loaderInvocationInterop = (state: JavaScriptSemanticAnalysisState) => {
 };
 
 export interface JavaScriptRequireCallFact {
+  readonly operation: "load" | "resolve";
   readonly loader: JavaScriptRequireLoaderFact;
   readonly arguments:
     | readonly t.CallExpression["arguments"][number][]
     | undefined;
   readonly sourceRelative: boolean;
+  /** A createRequire filename relative to the current source directory, when proven. */
+  readonly sourceRelativePath?: string;
 }
 
 /** Classify the selected loader and normalize invocation arguments once. */
@@ -591,7 +671,65 @@ export const semanticRequireCallAt = (
   factoryBindingIds: ReadonlySet<string>,
 ): JavaScriptRequireCallFact | undefined => {
   if (semanticModuleRequireCallAt(node, state))
-    return { loader: "unknown", arguments: undefined, sourceRelative: false };
+    return {
+      operation: "load",
+      loader: "unknown",
+      arguments: undefined,
+      sourceRelative: false,
+    };
+  const callee = unwrapJavaScriptExpression(node.callee).node;
+  if (
+    (t.isMemberExpression(callee) || t.isOptionalMemberExpression(callee)) &&
+    ["call", "apply"].includes(
+      semanticStaticPropertyKey(callee.property, callee.computed) ?? "",
+    ) &&
+    selectedRequireSourcesAt(callee, node, state, factoryBindingIds)?.loader ===
+      "local"
+  )
+    return {
+      operation: "load",
+      loader: "local",
+      arguments: undefined,
+      sourceRelative: false,
+    };
+  if (
+    (t.isMemberExpression(callee) || t.isOptionalMemberExpression(callee)) &&
+    semanticStaticPropertyKey(callee.property, callee.computed) === "resolve"
+  ) {
+    const loader = requireLoaderValueAt(
+      callee.object,
+      node,
+      state,
+      factoryBindingIds,
+    );
+    if (loader === "unknown")
+      return {
+        operation: "load",
+        loader,
+        arguments: undefined,
+        sourceRelative: false,
+      };
+    // Bundler factory loaders can share the `require` shape, but their
+    // `.resolve` member is not Node's module resolver.
+    if (loader === "commonjs-loader" || loader === "create-require") {
+      const selected = selectedRequireSourcesAt(
+        callee.object,
+        node,
+        state,
+        factoryBindingIds,
+      );
+      return {
+        operation: "resolve",
+        loader: selected?.loader ?? loader,
+        arguments: node.arguments,
+        sourceRelative:
+          selected?.sourceRelative ?? loader === "commonjs-loader",
+        ...(selected?.sourceRelativePath === undefined
+          ? {}
+          : { sourceRelativePath: selected.sourceRelativePath }),
+      };
+    }
+  }
   if (t.isNewExpression(node)) {
     const loader = requireLoaderValueAt(
       node.callee,
@@ -607,9 +745,13 @@ export const semanticRequireCallAt = (
     );
     if (selected !== undefined || loader !== "local")
       return {
+        operation: "load",
         loader: selected?.loader ?? loader,
         arguments: node.arguments,
         sourceRelative: selected?.sourceRelative ?? loader !== "create-require",
+        ...(selected?.sourceRelativePath === undefined
+          ? {}
+          : { sourceRelativePath: selected.sourceRelativePath }),
       };
   }
   const interop = loaderInvocationInterop(state);
@@ -637,8 +779,15 @@ export const semanticRequireCallAt = (
         ];
       return interop.intrinsicPath(callee);
     });
-    if (invocation?.path[0] === "require-loader")
+    if (invocation?.path[0] === "require-loader") {
+      const selected = selectedRequireSourcesAt(
+        node.callee,
+        node,
+        state,
+        factoryBindingIds,
+      );
       return {
+        operation: "load",
         loader:
           invocation.path[1] === "local"
             ? "local"
@@ -648,7 +797,11 @@ export const semanticRequireCallAt = (
         arguments: invocation.arguments,
         sourceRelative:
           invocation.kind === "known" && invocation.path[2] === "relative",
+        ...(selected?.sourceRelativePath === undefined
+          ? {}
+          : { sourceRelativePath: selected.sourceRelativePath }),
       };
+    }
   }
   const factory = semanticFactoryRequireLoaderAt(
     node,
@@ -658,6 +811,7 @@ export const semanticRequireCallAt = (
   return factory === undefined
     ? undefined
     : {
+        operation: "load",
         loader: factory,
         arguments: node.arguments.slice(t.isIdentifier(node.callee) ? 0 : 1),
         sourceRelative: true,
@@ -1328,17 +1482,9 @@ export const semanticGlobalProcessPathOrigin = (
   node: t.Node,
   state: JavaScriptSemanticAnalysisState,
 ): JavaScriptModuleOrigin | undefined => {
-  const members: string[] = [];
-  let current = unwrapJavaScriptExpression(node).node;
-  while (
-    t.isMemberExpression(current) ||
-    t.isOptionalMemberExpression(current)
-  ) {
-    const key = semanticStaticPropertyKey(current.property, current.computed);
-    if (key === null) return undefined;
-    members.unshift(key);
-    current = unwrapJavaScriptExpression(current.object).node;
-  }
+  const chain = semanticMemberChain(node);
+  if (chain === undefined) return undefined;
+  const { root: current, members } = chain;
   if (
     !t.isIdentifier(current) ||
     !["globalThis", "global", "window", "self"].includes(current.name) ||

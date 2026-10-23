@@ -31,7 +31,7 @@ import {
   buildSyntheticJavaScriptApplicationGraph,
 } from "../../../src/domain/javascript/javascriptApplicationGraph.fixture.js";
 import { writeVersionedJavaScriptApplicationFixtures } from "../../fixtures/javascriptArtifactApplication.js";
-import { JAVASCRIPT_APPLICATION_PROVIDER } from "../../../src/application/InvestigationProviders.js";
+import { JAVASCRIPT_APPLICATION_PROVIDER } from "../../../src/domain/investigationProviders.js";
 import { projectManagedApplicationGraphEvidence } from "../../../src/application/managed/ManagedApplicationGraphService.js";
 import { MANAGED_APPLICATION_GRAPH_EXAMPLE } from "../../../src/contracts/managed/managedWorkflowExamples.js";
 import { JAVASCRIPT_RUNTIME_RECONCILIATION_EXAMPLE } from "../../../src/contracts/javascript/javascriptRuntimeReconciliationExample.js";
@@ -198,6 +198,8 @@ describe("complete comparison projections", () => {
     ]);
     const compared = compareApplicationVersionsEvidence({ left, right });
     if (!compared.ok) throw compared.error;
+    expect(compared.value.sources[0]).toBe(left);
+    expect(compared.value.sources[1]).toBe(right);
     const result = compared.value.result;
     expectFullComparisonResultSchema(result);
     const modules = result.items.filter(

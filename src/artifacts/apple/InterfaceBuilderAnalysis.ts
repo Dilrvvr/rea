@@ -9,9 +9,12 @@ import {
   isUIKitRuntimeConnectionClass,
 } from "../../domain/apple/interfaceBuilderKeyedArchive.js";
 import { DirectoryArtifactReader } from "../DirectoryArtifactReader.js";
+import { ArtifactTraversalObservation } from "../ArtifactTraversalObservation.js";
 import {
   projectPlistValue,
   binaryDatePrecisionOverlapLimitation,
+  negativeZeroRealLimitation,
+  nonFiniteRealLimitation,
   unknownDateLimitation,
   unknownScalarLimitation,
 } from "../../domain/apple/plistValue.js";
@@ -26,7 +29,11 @@ import {
   InterfaceBuilderDecodeBudget,
   InterfaceBuilderDecodeBudgetExceeded,
 } from "./InterfaceBuilderDecodeBudget.js";
-import type { ArtifactEntry } from "../ArtifactReader.js";
+import {
+  ArtifactReaderFailure,
+  type ArtifactEntry,
+  type ArtifactReaderTraversal,
+} from "../ArtifactReader.js";
 import {
   buildInterfaceBuilderAnalysis,
   interfaceBuilderLimitsSchema,
@@ -44,6 +51,7 @@ import { decodeXmlPlistText } from "../../domain/propertyListXmlText.js";
 import {
   decodeBinaryPlistScalars,
   scanBinaryPlistScalars,
+  UnsupportedBinaryPlistUidError,
   type BinaryPlistScalarDecodePlan,
 } from "./PlistScalars.js";
 import type { PlistNumberLiterals } from "../../domain/apple/plistNumbers.js";
@@ -55,6 +63,13 @@ import {
 const MAX_AGGREGATE_INPUT_BYTES = 32 * 1024 * 1024;
 const MAX_AGGREGATE_DECODE_BYTES = 256 * 1024 * 1024;
 const MAX_REPORTED_OMITTED_ARCHIVES = 64;
+
+interface OmittedArchive {
+  readonly path: string;
+  readonly reason: string;
+  readonly limitations: readonly string[];
+}
+
 /** Decode compiled Interface Builder archives from a local app bundle. */
 export const analyzeInterfaceBuilderBundle = async (input: {
   readonly bundlePath: string;
@@ -67,7 +82,7 @@ export const analyzeInterfaceBuilderBundle = async (input: {
   const reader = new DirectoryArtifactReader(input.bundlePath);
   const documents: InterfaceBuilderDocumentInput[] = [];
   const invalid: string[] = [];
-  const omittedArchives: Array<{ path: string; reason: string }> = [];
+  const omittedArchives: OmittedArchive[] = [];
   let unreportedOmittedArchives = 0;
   const incompleteHierarchies = new Map<string, number>();
   const unresolvedConnections = new Map<string, number>();
@@ -75,15 +90,22 @@ export const analyzeInterfaceBuilderBundle = async (input: {
   const unknownDates = new Map<string, number>();
   const datePrecisionOverlaps = new Map<string, number>();
   const unknownScalars = new Map<string, number>();
+  const nonFiniteReals = new Map<string, number>();
+  const negativeZeroReals = new Map<string, number>();
   let omitted = 0;
   let attempted = 0;
   let aggregateInputBytes = 0;
+  const traversal = new ArtifactTraversalObservation();
   const decodeBudget = new InterfaceBuilderDecodeBudget(
     MAX_AGGREGATE_DECODE_BYTES,
   );
-  const recordOmittedArchive = (path: string, reason: string): void => {
+  const recordOmittedArchive = (
+    path: string,
+    reason: string,
+    limitations: readonly string[] = [],
+  ): void => {
     if (omittedArchives.length < MAX_REPORTED_OMITTED_ARCHIVES)
-      omittedArchives.push({ path, reason });
+      omittedArchives.push({ path, reason, limitations });
     else unreportedOmittedArchives += 1;
   };
   try {
@@ -91,10 +113,17 @@ export const analyzeInterfaceBuilderBundle = async (input: {
       reader,
       input.signal,
       limits.max_documents,
+      traversal,
     );
     omitted = selection.omitted;
     for (const entry of selection.omittedSamples)
       recordOmittedArchive(entry.path, "max_documents");
+    for (const entry of selection.symlinkSamples)
+      recordOmittedArchive(
+        entry.path,
+        "symlink_not_followed",
+        entry.limitations,
+      );
     unreportedOmittedArchives += selection.unreportedOmitted;
     for (const entry of selection.selected) {
       // Plist representation reserved for this document before decoding.
@@ -128,6 +157,7 @@ export const analyzeInterfaceBuilderBundle = async (input: {
           reachableWideIntegerOffsets: [],
           overlappingWideIntegerOffsets: [],
           reachableNumericOffsets: [],
+          uidOffsetsToNormalize: [],
         };
         let datePrecisionOverlapCount = 0;
         if (isNibArchive) {
@@ -186,6 +216,10 @@ export const analyzeInterfaceBuilderBundle = async (input: {
           incompleteHierarchies.set(entry.path, nib.omitted);
         if (nib !== null && nib.unresolvedConnections > 0)
           unresolvedConnections.set(entry.path, nib.unresolvedConnections);
+        if (nib !== null && nib.nonFiniteRealCount > 0)
+          nonFiniteReals.set(entry.path, nib.nonFiniteRealCount);
+        if (nib !== null && nib.negativeZeroRealCount > 0)
+          negativeZeroReals.set(entry.path, nib.negativeZeroRealCount);
         if (omittedPrototypeKeys !== 0)
           prototypeKeyOmissions.set(entry.path, omittedPrototypeKeys);
         if (unknownDateCount !== 0)
@@ -208,13 +242,22 @@ export const analyzeInterfaceBuilderBundle = async (input: {
             : { omittedSerializedHierarchyReferences: nib.omitted }),
         });
       } catch (cause: unknown) {
+        // Failed documents retain no plist representation, whatever phase
+        // rejected them. Do not charge that representation to later archives.
+        decodeBudget.release(plistReservation);
         if (input.signal?.aborted === true) throw cause;
+        // Read/identity failures describe source acquisition, not bad content.
+        if (cause instanceof ArtifactReaderFailure) throw cause;
         if (cause instanceof InterfaceBuilderDecodeBudgetExceeded) {
           // A document rejected while decoding, e.g. beyond the shared depth
           // limit, retains no representation; later documents keep its share.
-          decodeBudget.release(plistReservation);
           omitted += 1;
           recordOmittedArchive(entry.path, cause.reason);
+          continue;
+        }
+        if (cause instanceof UnsupportedBinaryPlistUidError) {
+          omitted += 1;
+          recordOmittedArchive(entry.path, "unsupported_uid_exact_range");
           continue;
         }
         invalid.push(
@@ -241,11 +284,14 @@ export const analyzeInterfaceBuilderBundle = async (input: {
     unknownDates,
     datePrecisionOverlaps,
     unknownScalars,
+    nonFiniteReals,
+    negativeZeroReals,
     invalid,
     omittedArchives,
     unreportedOmittedArchives,
     attempted,
     omitted,
+    traversal: traversal.snapshot(),
   });
 };
 
@@ -254,30 +300,57 @@ const selectInterfaceBuilderCandidates = async (
   reader: DirectoryArtifactReader,
   signal: AbortSignal | undefined,
   maximumDocuments: number,
+  traversal: ArtifactTraversalObservation,
 ): Promise<{
   readonly selected: readonly ArtifactEntry[];
   readonly omittedSamples: readonly ArtifactEntry[];
+  readonly symlinkSamples: readonly ArtifactEntry[];
   readonly omitted: number;
   readonly unreportedOmitted: number;
 }> => {
   const capacity = maximumDocuments + MAX_REPORTED_OMITTED_ARCHIVES;
   const candidates: ArtifactEntry[] = [];
+  const symlinkSamples: ArtifactEntry[] = [];
+  let symlinks = 0;
+  let unclassifiedSymlinks = 0;
+  let firstUnclassifiedSymlink: string | undefined;
   let total = 0;
-  for await (const entry of reader.entries(signal)) {
+  for await (const entry of reader.entries(signal, traversal)) {
+    if (entry.kind === "symlink") {
+      if (
+        isInterfaceBuilderArchive(entry.path) ||
+        entry.path.toLowerCase().endsWith(".storyboardc")
+      ) {
+        symlinks += 1;
+        retainCandidate(symlinkSamples, entry, MAX_REPORTED_OMITTED_ARCHIVES);
+      } else {
+        unclassifiedSymlinks += 1;
+        firstUnclassifiedSymlink ??= entry.path;
+      }
+      continue;
+    }
     if (entry.kind !== "file" || !isInterfaceBuilderArchive(entry.path))
       continue;
     total += 1;
     retainCandidate(candidates, entry, capacity);
   }
+  if (unclassifiedSymlinks > 0)
+    traversal.onCoverage({
+      status: "unknown",
+      limitations: [
+        `Interface Builder discovery did not follow ${unclassifiedSymlinks} symlink(s); whether they contain archives is unknown. First path: ${JSON.stringify(firstUnclassifiedSymlink)}.`,
+      ],
+    });
   const omittedSamples = candidates.slice(maximumDocuments, capacity);
   return {
     selected: candidates.slice(0, maximumDocuments),
     omittedSamples,
-    omitted: Math.max(0, total - maximumDocuments),
-    unreportedOmitted: Math.max(
-      0,
-      total - maximumDocuments - omittedSamples.length,
-    ),
+    symlinkSamples,
+    omitted: Math.max(0, total - maximumDocuments) + symlinks,
+    unreportedOmitted:
+      Math.max(0, total - maximumDocuments - omittedSamples.length) +
+      symlinks -
+      symlinkSamples.length,
   };
 };
 
@@ -312,11 +385,14 @@ const finalizeHierarchyCoverage = (
     unknownDates: ReadonlyMap<string, number>;
     datePrecisionOverlaps: ReadonlyMap<string, number>;
     unknownScalars: ReadonlyMap<string, number>;
+    nonFiniteReals: ReadonlyMap<string, number>;
+    negativeZeroReals: ReadonlyMap<string, number>;
     invalid: readonly string[];
-    omittedArchives: readonly { path: string; reason: string }[];
+    omittedArchives: readonly OmittedArchive[];
     unreportedOmittedArchives: number;
     attempted: number;
     omitted: number;
+    traversal: ArtifactReaderTraversal;
   },
 ) => {
   const {
@@ -326,6 +402,8 @@ const finalizeHierarchyCoverage = (
     unknownDates,
     datePrecisionOverlaps,
     unknownScalars,
+    nonFiniteReals,
+    negativeZeroReals,
     invalid,
     omittedArchives,
     unreportedOmittedArchives,
@@ -333,7 +411,8 @@ const finalizeHierarchyCoverage = (
   const archiveDecodePartial =
     invalid.length > 0 ||
     prototypeKeyOmissions.size > 0 ||
-    omittedArchives.length > 0;
+    counts.omitted > 0 ||
+    counts.traversal.status === "unknown";
   return {
     ...result,
     documents: result.documents.map((document) => ({
@@ -373,13 +452,19 @@ const finalizeHierarchyCoverage = (
             ? "aggregate_decode_budget_exhausted"
             : omittedArchives.some(({ reason }) => reason === "max_documents")
               ? "document_limit_reached"
-              : omittedArchives.length > 0
-                ? "archive_decode_budget_exhausted"
-                : invalid.length > 0
-                  ? "one_or_more_archives_invalid"
-                  : prototypeKeyOmissions.size > 0
-                    ? "dictionary_entries_omitted"
-                    : null,
+              : omittedArchives.some(
+                    ({ reason }) => reason === "symlink_not_followed",
+                  )
+                ? "archive_symlink_not_followed"
+                : omittedArchives.length > 0
+                  ? "archive_decode_budget_exhausted"
+                  : invalid.length > 0
+                    ? "one_or_more_archives_invalid"
+                    : prototypeKeyOmissions.size > 0
+                      ? "dictionary_entries_omitted"
+                      : counts.traversal.status === "unknown"
+                        ? "source_traversal_unknown"
+                        : null,
           examined: counts.attempted,
           omitted: counts.omitted,
         },
@@ -392,6 +477,7 @@ const finalizeHierarchyCoverage = (
     },
     limitations: [
       ...result.limitations,
+      ...counts.traversal.limitations,
       "Compiled Interface Builder archives are private serialized object graphs. The decoder reports only recognized keyed-archive objects and connections; unrecognized object classes and fields remain unknown.",
       ...(incompleteHierarchies.size === 0
         ? []
@@ -420,10 +506,16 @@ const finalizeHierarchyCoverage = (
       ...[...unknownScalars].map(
         ([path, count]) => `${path}: ${unknownScalarLimitation(count)}`,
       ),
-      ...omittedArchives.map(
-        ({ path, reason }) =>
-          `${path}: omitted because ${reason.replaceAll("_", " ")}.`,
+      ...[...nonFiniteReals].map(
+        ([path, count]) => `${path}: ${nonFiniteRealLimitation(count)}`,
       ),
+      ...[...negativeZeroReals].map(
+        ([path, count]) => `${path}: ${negativeZeroRealLimitation(count)}`,
+      ),
+      ...omittedArchives.flatMap(({ path, reason, limitations }) => [
+        `${path}: omitted because ${reason.replaceAll("_", " ")}.`,
+        ...limitations.map((limitation) => `${path}: ${limitation}`),
+      ]),
       ...(unreportedOmittedArchives === 0
         ? []
         : [
@@ -484,6 +576,21 @@ const projectNibArchive = (
     archive.classes.length * 96,
     "NIBArchive class projection exceeds the aggregate Interface Builder decode budget",
   );
+  let nonFiniteRealCount = 0;
+  let negativeZeroRealCount = 0;
+  const projectedValues = new Map<
+    number,
+    Readonly<Record<string, JsonValue>>
+  >();
+  for (const object of archive.objects) {
+    const projected = projectPlistValue(object.values);
+    nonFiniteRealCount += projected.nonFiniteRealCount;
+    negativeZeroRealCount += projected.negativeZeroRealCount;
+    projectedValues.set(
+      object.id,
+      projected.value as Readonly<Record<string, JsonValue>>,
+    );
+  }
   const dereference = (value: JsonValue | undefined): JsonValue | undefined => {
     if (typeof value !== "object" || value === null || Array.isArray(value))
       return value;
@@ -566,10 +673,12 @@ const projectNibArchive = (
         }
         budget.reserveJsonStringOccurrence(name);
         const nibValues = Object.fromEntries(
-          Object.entries(object.values).map(([key, value]) => {
-            budget.reserveJsonPropertyNameOccurrence(key);
-            return [key, dereference(value) ?? null];
-          }),
+          Object.entries(projectedValues.get(object.id) ?? {}).map(
+            ([key, value]) => {
+              budget.reserveJsonPropertyNameOccurrence(key);
+              return [key, dereference(value) ?? null];
+            },
+          ),
         );
         // Normalize only recognized scalar fields at the format owner. A keyed
         // archive's authored nibValues dictionary must not gain this meaning.
@@ -715,6 +824,8 @@ const projectNibArchive = (
   return {
     omitted: viewHierarchy.omitted + hierarchyOmitted + merged.omitted,
     unresolvedConnections,
+    nonFiniteRealCount,
+    negativeZeroRealCount,
     raw: jsonValueSchema.parse({
       "com.apple.ibtool.document.objects": objects,
       "com.apple.ibtool.document.connections": connections,

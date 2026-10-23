@@ -281,7 +281,7 @@ it.each([
       bytes,
       layout,
       row.readIndex(layout.blobIndexSize),
-      layout.blob.size,
+      layout.blob?.size ?? 0,
     );
     const blobOffset = blob.byteOffset - bytes.byteOffset;
     const result = inspectManagedMembersBytes(
@@ -428,6 +428,8 @@ describe("managed member inspection", () => {
     expect(result.call_edges).toEqual([
       {
         caller_token: "0x06000001",
+        il_offset: 6,
+        target_identity_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
         caller: "Fixture.Program.Main",
         opcode: "call",
         target_token: "0x0a000001",
@@ -440,6 +442,8 @@ describe("managed member inspection", () => {
     expect(result.field_accesses).toEqual([
       {
         method_token: "0x06000001",
+        il_offset: 1,
+        target_identity_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
         method: "Fixture.Program.Main",
         opcode: "ldfld",
         field_token: "0x04000001",
@@ -1575,10 +1579,13 @@ describe("managed derived edges", () => {
       token: "0x06000001",
       declaring_type: "T".repeat(2000),
       name: "m",
-      body: { anchors: Array.from({ length: 40_000 }, () => anchor) },
+      body: { anchors: Array.from({ length: 16 }, () => anchor) },
     } as unknown as ManagedMethod;
 
-    expect(() => edges([method], new Map(), new ManagedDecodeBudget())).toThrow(
+    const budget = new ManagedDecodeBudget();
+    // Exercise the same capacity boundary without constructing 64 MiB of edges.
+    budget.reserve(64 * 1024 * 1024 - 16 * 1024, null);
+    expect(() => edges([method], new Map(), budget)).toThrow(
       ManagedReaderFailure,
     );
   });
@@ -1589,7 +1596,7 @@ describe("managed derived caller names", () => {
     let built = false;
     // A string-like type name records whether the caller was interpolated.
     const declaringType = {
-      length: 70 * 1024 * 1024,
+      length: 2048,
       charCodeAt: () => 0x54,
       toString: () => {
         built = true;
@@ -1612,7 +1619,10 @@ describe("managed derived caller names", () => {
       },
     } as unknown as ManagedMethod;
 
-    expect(() => edges([method], new Map(), new ManagedDecodeBudget())).toThrow(
+    const budget = new ManagedDecodeBudget();
+    // Only the remaining capacity matters to refusal before interpolation.
+    budget.reserve(64 * 1024 * 1024 - 1024, null);
+    expect(() => edges([method], new Map(), budget)).toThrow(
       ManagedReaderFailure,
     );
     expect(built).toBe(false);
@@ -2107,6 +2117,42 @@ it("decodes typed references in parameter and return positions", () => {
   });
 });
 
+it("decodes VARARG optional parameters in method and function-pointer signatures", () => {
+  expect(
+    signature(Buffer.from([0x05, 0x02, 0x01, 0x08, 0x41, 0x0e])),
+  ).toMatchObject({
+    kind: "method",
+    parse_status: "decoded",
+    parameter_count: 2,
+    parameter_types: ["i4", "string"],
+  });
+  expect(
+    signature(Buffer.from([0x06, 0x1b, 0x05, 0x02, 0x01, 0x08, 0x41, 0x0e])),
+  ).toMatchObject({
+    kind: "field",
+    parse_status: "decoded",
+    field_type: "fnptr[vararg](i4,string)->void",
+  });
+});
+
+it.each([
+  [
+    "sentinel in a DEFAULT signature",
+    [0x00, 0x01, 0x01, 0x41, 0x08],
+    "unsupported",
+  ],
+  [
+    "duplicate VARARG sentinels",
+    [0x05, 0x02, 0x01, 0x41, 0x41, 0x08],
+    "malformed",
+  ],
+])("does not accept %s as a valid method signature", (_name, bytes, status) => {
+  expect(signature(Buffer.from(bytes))).toMatchObject({
+    kind: "unknown",
+    parse_status: status,
+  });
+});
+
 it.each([
   ["by-reference field", [0x06, 0x10, 0x08], { field_type: "i4&" }],
   ["void pointer field", [0x06, 0x0f, 0x01], { field_type: "void*" }],
@@ -2209,13 +2255,15 @@ it.each([
 );
 
 it.each([
-  { facet: "fields", nameOffset: 2 },
-  { facet: "methods", nameOffset: 8 },
-  { facet: "member_refs", nameOffset: 2 },
-  { facet: "types", nameOffset: 4 },
+  { facet: "fields", nameOffsets: [2] },
+  { facet: "methods", nameOffsets: [8] },
+  { facet: "member_refs", nameOffsets: [2] },
+  { facet: "types", nameOffsets: [4] },
+  { facet: "types", nameOffsets: [6] },
+  { facet: "types", nameOffsets: [4, 6] },
 ] as const)(
-  "preserves independent metadata when a $facet name is unreadable",
-  ({ facet, nameOffset }) => {
+  "preserves independent metadata when $facet name columns $nameOffsets are unreadable",
+  ({ facet, nameOffsets }) => {
     const bytes = buildManagedPeFixture();
     const original = inspectManagedMembersBytes(
       bytes,
@@ -2223,7 +2271,8 @@ it.each([
     );
     const row = original[facet][0]?.row_offset;
     if (row === undefined) throw new Error(`Fixture must contain ${facet}`);
-    bytes.writeUInt16LE(0xffff, row + nameOffset);
+    for (const [index, nameOffset] of nameOffsets.entries())
+      bytes.writeUInt16LE(0xffff - index, row + nameOffset);
     const result = inspectManagedMembersBytes(
       bytes,
       managedPeFixtureTarget(bytes),
@@ -2242,13 +2291,17 @@ it.each([
         expect(result[remaining]).toHaveLength(original[remaining].length);
     expect(result.coverage).toMatchObject({
       state: "partial",
-      issues: [
+      issues: nameOffsets.map(() =>
         expect.objectContaining({
           code: "invalid-heap-index",
           scope: "metadata.#Strings",
+          offset: expect.any(Number),
         }),
-      ],
+      ),
     });
+    expect(
+      new Set(result.coverage.issues.map(({ offset }) => offset)).size,
+    ).toBe(nameOffsets.length);
     if (facet === "types") {
       expect(result.fields[0]).toMatchObject({
         declaring_type_token: "0x02000001",
@@ -2291,25 +2344,32 @@ describe("managed member type selection", () => {
     );
   });
 
-  it("does not treat a name as absent when a TypeDef name is unreadable", () => {
-    const corrupt = Buffer.from(bytes);
-    const row = everything.types[0]?.row_offset ?? 0;
-    // Point the TypeDef Name past the #Strings heap.
-    corrupt.writeUInt16LE(0xffff, row + 4);
-    const result = inspectManagedMembersBytes(
-      corrupt,
-      managedPeFixtureTarget(corrupt),
-      { typeNames: ["Fixture.Program"] },
-    );
+  it.each([
+    { column: "name", offset: 4 },
+    { column: "namespace", offset: 6 },
+  ])(
+    "does not treat a name as absent when a TypeDef $column is unreadable",
+    ({ offset }) => {
+      const corrupt = Buffer.from(bytes);
+      const row = everything.types[0]?.row_offset ?? 0;
+      corrupt.writeUInt16LE(0xffff, row + offset);
+      const result = inspectManagedMembersBytes(
+        corrupt,
+        managedPeFixtureTarget(corrupt),
+        { typeNames: ["Fixture.Program"] },
+      );
 
-    expect(result.selection?.unmatched_type_names).toEqual(["Fixture.Program"]);
-    expect(result.coverage.state).toBe("partial");
-    // Its methods were never inspected, so neither were their literals.
-    expect(result.user_strings?.state).toBe("partial");
-    expect(result.limitations).toContain(
-      "1 TypeDef name(s) could not be read; a name in selection.unmatched_type_names may belong to one of them, so its absence is not observed.",
-    );
-  });
+      expect(result.selection?.unmatched_type_names).toEqual([
+        "Fixture.Program",
+      ]);
+      expect(result.coverage.state).toBe("partial");
+      // Its methods were never inspected, so neither were their literals.
+      expect(result.user_strings?.state).toBe("partial");
+      expect(result.limitations).toContain(
+        "1 TypeDef name(s) could not be read; a name in selection.unmatched_type_names may belong to one of them, so its absence is not observed.",
+      );
+    },
+  );
 
   it("omits members of unselected types without dropping member references", () => {
     const result = inspectManagedMembersBytes(bytes, target, {

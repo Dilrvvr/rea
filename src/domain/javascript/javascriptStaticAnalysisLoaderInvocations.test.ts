@@ -5,7 +5,8 @@ import { expect, it } from "vitest";
 
 import { analyzeJavaScriptStaticSource } from "./javascriptStaticAnalysis.js";
 import { parseJavaScriptSource } from "./javascriptSourceParser.js";
-import { unshadowedReferenceSourceRequireCalls } from "../referenceSourceRequireBindings.js";
+import { referenceSourceRequireCalls } from "../referenceSourceRequireBindings.js";
+import { parseReferenceSourceImports } from "../referenceSourceImportParsing.js";
 
 it.each(["require", "require.resolve", "require.main"])(
   "distinguishes invoked loading from reference association for %s",
@@ -21,13 +22,20 @@ it.each(["require", "require.resolve", "require.main"])(
     expect(analysis.references).toEqual(
       callee === "require"
         ? [expect.objectContaining({ kind: "require", specifier: "node:path" })]
-        : [],
+        : callee === "require.resolve"
+          ? [
+              expect.objectContaining({
+                kind: "require",
+                specifier: "node:path",
+              }),
+            ]
+          : [],
     );
     const parsed = parseJavaScriptSource(source);
     if (parsed === null) throw new Error("Expected loader association fixture");
-    expect(
-      unshadowedReferenceSourceRequireCalls(parsed, "entry.cjs").size,
-    ).toBe(1);
+    expect(referenceSourceRequireCalls(parsed, "entry.cjs").size).toBe(
+      callee === "require.main" ? 0 : 1,
+    );
   },
 );
 
@@ -36,6 +44,12 @@ it.each([
   [
     "proven factory",
     `${imported}const require=make(import.meta.url);require('node:path');`,
+    1,
+    "node:path",
+  ],
+  [
+    "renamed proven factory",
+    `${imported}const load=make(import.meta.url);load('node:path');`,
     1,
     "node:path",
   ],
@@ -50,9 +64,9 @@ it.each([
   (_name, source, associated, specifier) => {
     const parsed = parseJavaScriptSource(source);
     if (parsed === null) throw new Error("Expected factory proof fixture");
-    expect(
-      unshadowedReferenceSourceRequireCalls(parsed, "entry.mjs").size,
-    ).toBe(associated);
+    expect(referenceSourceRequireCalls(parsed, "entry.mjs").size).toBe(
+      associated,
+    );
     const analysis = analyzeJavaScriptStaticSource(source);
     expect(analysis.parse_error_count).toBe(0);
     expect(
@@ -60,6 +74,110 @@ it.each([
     ).toEqual([expect.objectContaining({ kind: "require", specifier })]);
   },
 );
+
+it("associates a renamed createRequire resolve method with search options", () => {
+  const parsed = parseJavaScriptSource(
+    `${imported}const load=make(import.meta.url);load.resolve('node:path',{paths:[]});`,
+  );
+  if (parsed === null) throw new Error("Expected factory proof fixture");
+  expect(referenceSourceRequireCalls(parsed, "entry.mjs").size).toBe(1);
+});
+
+it("keeps current-file and mixed createRequire bases distinct", () => {
+  const currentFile = parseJavaScriptSource(
+    `${imported}const load=make(import.meta.url);load('./dep.cjs');`,
+  );
+  if (currentFile === null)
+    throw new Error("Expected current-file base fixture");
+  const currentCall = [
+    ...referenceSourceRequireCalls(currentFile, "sub/main.mjs").keys(),
+  ][0];
+  expect(
+    referenceSourceRequireCalls(currentFile, "sub/main.mjs").get(currentCall!)
+      ?.resolutionBase,
+  ).toBe("source-file");
+
+  const mixed = parseJavaScriptSource(
+    `${imported}const load=make(flag?import.meta.url:new URL('./sub/entry.cjs',import.meta.url));load('./dep.cjs');`,
+  );
+  if (mixed === null) throw new Error("Expected mixed-base fixture");
+  const mixedBases = referenceSourceRequireCalls(mixed, "main.mjs");
+  expect(
+    [...mixedBases.values()].map(({ resolutionBase }) => resolutionBase),
+  ).toEqual(["unknown"]);
+});
+
+it("keeps literal CommonJS resolve calls in historical source parsing", () => {
+  const source = [
+    'require.resolve("./dep.cjs");',
+    'require.resolve("./same-path.cjs", { paths: [__dirname] });',
+    'require.resolve("./dep.cjs", { paths: [__dirname + "/sub"] });',
+    'require.resolve("./dep.cjs", { paths: [] });',
+    'function shadow(__dirname) { require.resolve("./shadow.cjs", { paths: [__dirname] }); }',
+  ].join("\n");
+  const result = parseReferenceSourceImports(
+    "main.cjs",
+    new TextEncoder().encode(source),
+    "JavaScript",
+  );
+  expect(
+    result.relationships.map(({ to, resolution, parse_state }) => ({
+      to,
+      resolution,
+      parse_state,
+    })),
+  ).toEqual([
+    { to: "./dep.cjs", resolution: "internal", parse_state: "parsed" },
+    { to: "./same-path.cjs", resolution: "internal", parse_state: "parsed" },
+    { to: "./dep.cjs", resolution: "unknown", parse_state: "partial" },
+    { to: "./dep.cjs", resolution: "unknown", parse_state: "partial" },
+    { to: "./shadow.cjs", resolution: "unknown", parse_state: "partial" },
+  ]);
+});
+
+it("retains a mutated require.resolve request as an unknown fact", () => {
+  const source = `${imported}const load=make(import.meta.url);load.resolve=custom;load.resolve("./dep.cjs");`;
+  const result = parseReferenceSourceImports(
+    "main.mjs",
+    new TextEncoder().encode(source),
+    "JavaScript",
+  );
+  expect(
+    result.relationships.filter(({ kind }) => kind === "requires"),
+  ).toEqual([
+    expect.objectContaining({
+      from_path: "main.mjs",
+      to: "./dep.cjs",
+      kind: "requires",
+      resolution: "unknown",
+      parse_state: "partial",
+    }),
+  ]);
+  expect(
+    analyzeJavaScriptStaticSource(source).references.filter(
+      ({ kind }) => kind === "require",
+    ),
+  ).toEqual([
+    expect.objectContaining({
+      kind: "require",
+      operation: "load",
+      specifier: null,
+    }),
+  ]);
+});
+
+it("does not treat bundler factory resolve members as Node resolvers", () => {
+  const analysis = analyzeJavaScriptStaticSource(`
+    globalThis.webpackChunkApp.push([[1], {
+      "factory": function (module, exports, loader) {
+        loader.resolve("./not-a-dependency.cjs");
+      }
+    }]);
+  `);
+  expect(analysis.references.filter(({ kind }) => kind === "require")).toEqual(
+    [],
+  );
+});
 
 it.each([
   [

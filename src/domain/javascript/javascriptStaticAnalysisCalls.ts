@@ -23,6 +23,7 @@ import {
   stringValue,
 } from "./javascriptStaticAnalysisHelpers.js";
 import {
+  semanticStaticPropertyKey,
   semanticStaticPropertyName,
   unwrapJavaScriptExpression,
 } from "./javascriptAstValues.js";
@@ -50,6 +51,7 @@ import { semanticTopLevelEffectFollowsCapture } from "./javascriptSemanticMutati
 import {
   semanticFactoryLoaderMemberAt,
   semanticRequireCallAt,
+  semanticRequireLoaderAt,
   semanticModuleRequireCallAt,
   semanticModuleRequireReceiver,
 } from "./javascriptSemanticRequireOrigin.js";
@@ -69,9 +71,17 @@ export const inspectCall = (
   const { accumulator } = context;
   const name = calleeName(node.callee);
   const first = stringValue(node.arguments[0]);
+  const deferredRequireResolve =
+    isRequireResolveCall(node) &&
+    semanticRequireLoaderAt(
+      node,
+      bindings,
+      accumulator.factoryRequireBindingIds,
+    ) !== "local";
   const deferredModuleRequire =
     semanticModuleRequireReceiver(node) !== undefined ||
-    semanticModuleRequireCallAt(node, bindings, false);
+    semanticModuleRequireCallAt(node, bindings, false) ||
+    deferredRequireResolve;
   if (deferredModuleRequire) accumulator.pendingModuleRequireCalls.push(node);
   const requireCall = deferredModuleRequire
     ? null
@@ -81,6 +91,10 @@ export const inspectCall = (
       node,
       kind: "require",
       specifier: requireCall.specifier,
+      operation: requireCall.operation,
+      ...(requireCall.resolutionBasePath === undefined
+        ? {}
+        : { resolutionBasePath: requireCall.resolutionBasePath }),
     });
   const chunkLoad = chunkLoadSpecifier(node, bindings, context);
   if (chunkLoad !== null)
@@ -254,32 +268,70 @@ const requireCallSpecifier = (
   node: JavaScriptCallLike,
   bindings: JavaScriptSemanticAnalysisState,
   context: FindingContext,
-): { readonly specifier: string | undefined } | null => {
+  resolveMemberChanged = false,
+): {
+  readonly specifier: string | undefined;
+  readonly operation: "load" | "resolve";
+  readonly resolutionBasePath?: string;
+} | null => {
   const call = semanticRequireCallAt(
     node,
     bindings,
     context.accumulator.factoryRequireBindingIds,
   );
   if (call === undefined || call.loader === "local") return null;
-  if (call.loader === "unknown" || !call.sourceRelative) {
+  if (
+    resolveMemberChanged ||
+    call.loader === "unknown" ||
+    !call.sourceRelative
+  ) {
     context.accumulator.unknownFindings += 1;
-    return { specifier: undefined };
+    return {
+      specifier: undefined,
+      operation: resolveMemberChanged ? "load" : call.operation,
+    };
   }
-  return { specifier: argumentValue(call.arguments?.[0]) };
+  return {
+    operation: call.operation,
+    specifier: argumentValue(call.arguments?.[0]),
+    ...(call.sourceRelativePath === undefined
+      ? {}
+      : { resolutionBasePath: call.sourceRelativePath }),
+  };
 };
 
 /** Examine member-loader receivers only after shared alias mutation facts settle. */
 export const finishModuleRequireCalls = (
   context: FindingContext,
-  bindings: JavaScriptSemanticAnalysisState,
+  index: JavaScriptBindingIndex,
 ): void => {
   for (const node of context.accumulator.pendingModuleRequireCalls) {
-    const call = requireCallSpecifier(node, bindings, context);
+    const resolveMemberChanged =
+      isRequireResolveCall(node) &&
+      (t.isMemberExpression(node.callee) ||
+        t.isOptionalMemberExpression(node.callee)) &&
+      index
+        .effectsForReferenceAt(node, node.callee.object, ["resolve"])
+        .effects.some(
+          ({ kind, timing }) =>
+            timing !== "after" &&
+            (kind === "member-write" || kind === "escape"),
+        );
+    const call = requireCallSpecifier(
+      node,
+      index.bindings,
+      context,
+      resolveMemberChanged,
+    );
     if (call !== null)
       addReference(context, {
         node,
         kind: "require",
         specifier: call.specifier,
+        operation: call.operation,
+        ...(call.resolutionBasePath === undefined
+          ? {}
+          : { resolutionBasePath: call.resolutionBasePath }),
       });
   }
   context.accumulator.pendingModuleRequireCalls.length = 0;
@@ -287,6 +339,15 @@ export const finishModuleRequireCalls = (
     (left, right) => left.offset - right.offset,
   );
 };
+
+const isRequireResolveCall = (
+  node: JavaScriptCallLike,
+): node is t.CallExpression | t.OptionalCallExpression =>
+  (t.isCallExpression(node) || t.isOptionalCallExpression(node)) &&
+  (t.isMemberExpression(node.callee) ||
+    t.isOptionalMemberExpression(node.callee)) &&
+  semanticStaticPropertyKey(node.callee.property, node.callee.computed) ===
+    "resolve";
 
 const chunkLoadSpecifier = (
   node: JavaScriptCallLike,
@@ -893,11 +954,15 @@ export const addReference = (
       : { specifier, expression: null };
   addLocatedFinding(context, {
     collection: context.accumulator.references,
-    key: `reference\0${input.kind}\0${reference.specifier ?? reference.expression}`,
+    key: `reference\0${input.kind}\0${input.operation ?? "load"}\0${reference.specifier ?? reference.expression}\0${input.resolutionBasePath ?? ""}`,
     node: input.node,
     value: {
       kind: input.kind,
+      operation: input.operation ?? "load",
       ...reference,
+      ...(input.resolutionBasePath === undefined
+        ? {}
+        : { resolution_base_path: input.resolutionBasePath }),
       module_key: null,
       location: range(input.node),
     },

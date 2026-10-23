@@ -24,7 +24,6 @@ import { normalizeCliArguments } from "./cliOutput.js";
 
 import { createLogger } from "./logger.js";
 import { parseLogLevel } from "./config/processStart.js";
-import { projectAnalysisError } from "./domain/analysisErrorProjection.js";
 import { PRODUCT_IDENTITY } from "./identity.js";
 import { npxRegistrationCommand } from "./application/ClientRegistrationIdentity.js";
 import { registerSetupCommands } from "./cli/setupCommands.js";
@@ -52,7 +51,7 @@ import { registerJavaScriptRecoveryCommands } from "./cli/javascriptRecoveryComm
 import { registerAdvancedBrowserCommands } from "./cli/browserAdvancedCommands.js";
 import { registerBrowserScenarioCommands } from "./cliBrowserScenarioCommands.js";
 import { registerElectronCommands } from "./cli/electronCommands.js";
-import { registerJavaScriptRuntimeObservationCommands } from "./cliJavaScriptRuntimeCommands.js";
+import { registerJavaScriptRuntimeObservationCommands } from "./cli/javascriptRuntimeCommands.js";
 import { registerApplicationCommands } from "./cli/applicationCommands.js";
 import { presentOmittableDefaults } from "./cli/omittableDefaults.js";
 import type { CliInstance } from "./cli/types.js";
@@ -65,19 +64,6 @@ import { registerCutterCommands } from "./cli/cutterCommands.js";
 import { excludeDeclaredSensitiveArguments } from "./cli/explicitSensitiveArguments.js";
 
 export { closeCliJavaScriptResources } from "./cli/javascriptApplicationAnalysis.js";
-
-/**
- * Describe CLI settings that are invalid before any command runs, as MCP does.
- * CLI, MCP and Doctor share the process-start configuration contract.
- */
-export const cliConfigurationError = (
-  selectedEnvironment: Readonly<Record<string, string | undefined>>,
-): string | undefined => {
-  const value = selectedEnvironment.REA_LOG_LEVEL;
-  if (value === undefined) return undefined;
-  const level = parseLogLevel(value);
-  return level.ok ? undefined : projectAnalysisError(level.error).message;
-};
 
 /**
  * Build the one-shot Incur CLI without starting Hopper at import time.

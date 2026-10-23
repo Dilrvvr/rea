@@ -90,6 +90,32 @@ export class ArtifactFileCleanupFailure<
   }
 }
 
+/** Errnos raised while the caller-selected artifact path is being resolved. */
+export type ArtifactSelectedPathErrno =
+  | "ENOENT"
+  | "ENOTDIR"
+  | "ELOOP"
+  | "ENAMETOOLONG";
+
+/** Return only known path-resolution errnos; permissions and I/O remain distinct. */
+export const artifactSelectedPathErrno = (
+  cause: unknown,
+): ArtifactSelectedPathErrno | undefined => {
+  if (!(cause instanceof Error) || !("code" in cause)) return undefined;
+  switch (String(cause.code)) {
+    case "ENOENT":
+      return "ENOENT";
+    case "ENOTDIR":
+      return "ENOTDIR";
+    case "ELOOP":
+      return "ELOOP";
+    case "ENAMETOOLONG":
+      return "ENAMETOOLONG";
+    default:
+      return undefined;
+  }
+};
+
 /** Normalize the physical primary failure without replacing its exact cleanup owner. */
 export const mapArtifactFileFailure = (
   cause: unknown,
@@ -141,6 +167,32 @@ export class ArtifactFileCancelled<
     });
   }
 }
+
+/** Completion facts recorded by the file owner, independent of later caller state. */
+export const artifactFileCompletion = (
+  cause: unknown,
+):
+  | {
+      readonly kind: "completed";
+      readonly value: unknown;
+      readonly cancellation: { readonly reason: unknown } | undefined;
+    }
+  | undefined => {
+  if (cause instanceof ArtifactFileCancelled)
+    return {
+      ...cause.fileCancellation.outcome,
+      cancellation: { reason: cause.fileCancellation.reason },
+    };
+  if (
+    cause instanceof ArtifactFileCleanupFailure &&
+    cause.fileCleanupFailure.outcome.kind === "completed"
+  )
+    return {
+      ...cause.fileCleanupFailure.outcome,
+      cancellation: cause.fileCleanupFailure.completionCancellation,
+    };
+  return undefined;
+};
 
 /** Bind a translated failure to its exact descriptor leases, including failed retries. */
 export const bindArtifactFileCleanup = (

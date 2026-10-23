@@ -6,18 +6,38 @@ MCP. They read archive bytes without launching the application. Bytecode
 source decompilation, encrypted PYZ recovery, zipapp and PEX analysis are outside
 this capability.
 
+`extract_artifact.coverage` preserves the inventory producer's source traversal
+scope and certainty. Successful publication proves that the selected inventoried
+regular files were written and verified; it does not prove that every source
+entry was representable or every embedded payload was decoded. For example, a
+directory containing an invalid UTF-8 filename can publish its representable
+files successfully while coverage remains `unknown`. Extraction retains the
+inventory's command provenance and limitations, plus the selected occurrences'
+path-qualified derivation notices. A reconstructed `.pyc` header therefore stays
+identified as derived bytes in the extraction result.
+
 ## Facts and focused queries
 
 The root occurrence's `format_metadata` records the CArchive layout (2.0 or
 2.1), archive and cookie offsets, table extent, entry count, raw Python version,
 normalized major/minor when known, library name and encryption marker. Member
 metadata retains the original name, table index, type, compression flag,
-relative offset and known directory record extent. Logical paths use archive
-path rules; the source name retains its spelling, including backslashes.
+relative offset and known directory record extent. Logical paths follow the
+carrier's path dialect: backslashes separate components for PE carriers, while
+they remain literal filename characters for POSIX carriers. The source name
+always retains its stored spelling. If the carrier dialect is unconfirmed, REA
+preserves backslashes verbatim instead of inferring POSIX semantics.
 `relative_offset` is relative to the CArchive start for CArchive rows, or to
 the decoded PYZ image for PYZ rows. A CArchive directory record starts at
 `archive_start + toc_offset + directory_record_offset`; its size is
 `directory_record_size`. PYZ row directory extents remain unknown.
+CArchive type `b` retains PyInstaller's executable-member declaration in the
+generic `executable` fact; type `x` remains non-executable. This comes from the
+archive type code, not the filename or member contents.
+Distinct CArchive rows retain their table-index identities even when they
+share a logical path. Inventory can preserve both a file and a decoded PYZ
+directory at that path, including the PYZ children; extraction refuses a
+destination conflict instead of silently omitting those children.
 
 Namespace packages remain metadata declarations at their projected query path;
 they do not claim a destination directory. Their `relative_offset` and
@@ -105,7 +125,9 @@ returns a resource failure.
 
 Supported final Python bytecode magic values cover Python 3.7 through 3.14.
 Supported marshal directory values are lists, tuples, strings, integers and
-bytes. Directory values follow the identified CPython marshal semantics; for
+bytes, including interned Unicode strings used for module names. Unicode strings
+use CPython's UTF-8 `surrogatepass` encoding, preserving lone surrogate code
+points in decoded module names. Directory values follow the identified CPython marshal semantics; for
 example, a long integer with a zero most-significant digit is malformed and is
 not normalized into a valid table value. An unsupported magic or malformed or
 unsupported directory stays an opaque member with a limitation and
@@ -122,11 +144,15 @@ The directory declares compressed module lengths, so uncompressed declared
 sizes and source spans inside decoded data remain unknown.
 
 PYZ modules receive a derived 16-byte `.pyc` header from their own supported
-magic. CArchive bytecode receives that header only when every sibling PYZ magic
-and the cookie's Python version agree. Otherwise it retains its original bytes
-and `bytecode_header: "unknown"`. `bytecode_magic` and graph derivation edges
-identify synthesized headers; member digests cover the resulting derived files.
-These headers do not establish successful execution or decompilation.
+magic. CArchive scripts receive that header only when every sibling PYZ magic
+and the cookie's Python version agree. Under the same agreement, CArchive
+modules (`m`/`M`) receive a header only when their decompressed prefix identifies
+headerless marshal code. Legacy modules that retain a `.pyc` header, and modules
+whose prefix is unrecognized, preserve their original bytes and report
+`bytecode_header: "unknown"`. A header prefix does not establish that the entire
+file is valid. `bytecode_magic` and graph derivation edges identify synthesized
+headers; member digests cover the resulting derived files. These headers do not
+establish successful execution or decompilation.
 
 The nonempty CArchive Python module `pyimod00_crypto_key` (`m`/`M`) is recorded
 as an encryption marker; a same-named data file or script is not. Affected

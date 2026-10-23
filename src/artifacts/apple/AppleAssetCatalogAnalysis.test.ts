@@ -14,6 +14,52 @@ import {
   collectInterfaceBuilderResourceKeys,
 } from "./AppleAssetCatalogAnalysis.js";
 
+describe("Apple asset catalog traversal coverage", () => {
+  it.for([false, true])(
+    "retains catalog traversal coverage with invalid-byte entries: %s",
+    async (invalidName, context) => {
+      if (invalidName && process.platform !== "linux") context.skip();
+      const bundle = await createTestTempDirectory("rea-asset-traversal-");
+      if (invalidName)
+        await writeFile(
+          Buffer.concat([Buffer.from(`${bundle}/`), Buffer.from([0xff])]),
+          "unrepresented",
+        );
+      const result = await analyzeAppleAssetCatalogs({
+        bundlePath: bundle,
+        targetSha256: "a".repeat(64),
+        environment: {},
+        runAssetUtil: async () => {
+          throw new Error("no catalog was admitted");
+        },
+      });
+      expect(result.inventory_coverage).toEqual({
+        scope: "container-entries",
+        status: invalidName ? "unknown" : "complete",
+      });
+      if (invalidName)
+        expect(result.limitations).toContainEqual(
+          expect.stringContaining("not valid UTF-8"),
+        );
+    },
+  );
+
+  it("keeps represented symlinks distinct from catalog-target inspection", async () => {
+    const bundle = await createTestTempDirectory("rea-asset-subtree-");
+    await symlink("unexamined", join(bundle, "Resources"));
+    const result = await analyzeAppleAssetCatalogs({
+      bundlePath: bundle,
+      targetSha256: "a".repeat(64),
+      environment: {},
+      runAssetUtil: async () => "[]",
+    });
+    expect(result.inventory_coverage.status).toBe("complete");
+    expect(result.limitations).toContainEqual(
+      expect.stringContaining("catalogs beneath them may remain uninspected"),
+    );
+  });
+});
+
 describe("Apple asset catalog application workflow", () => {
   it("joins only explicit resource-key fields with archive provenance", () => {
     expect(
@@ -146,6 +192,34 @@ describe("Apple asset catalog application workflow", () => {
     );
   });
 });
+
+it.skipIf(process.platform === "win32")(
+  "qualifies UI resource joins when a symlinked nib was not decoded",
+  async () => {
+    const bundle = await createTestTempDirectory("rea-asset-ui-symlink-");
+    const resources = join(bundle, "Contents", "Resources");
+    await mkdir(resources, { recursive: true });
+    await writeFile(
+      join(resources, "Panel.data"),
+      encodeNibArchiveFixture({
+        classes: ["NSView"],
+        objects: [{ classIndex: 0, values: { title: "Panel" } }],
+      }),
+    );
+    await symlink("Panel.data", join(resources, "Panel.nib"));
+    const result = await analyzeAppleAssetCatalogs({
+      bundlePath: bundle,
+      environment: {},
+      targetSha256: "a".repeat(64),
+      runAssetUtil: () => {
+        throw new Error("No catalog is present");
+      },
+    });
+    expect(result.limitations).toContain(
+      "Interface Builder resource-key joins may be incomplete because the decoded UI graph was truncated.",
+    );
+  },
+);
 
 it.each([0, 1, 5])(
   "keeps an empty assetutil inventory complete at offset %i",

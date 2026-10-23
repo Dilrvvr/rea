@@ -4,6 +4,7 @@ import {
   createRustImage,
   createRustImageWithGoSection,
   createRustHashOverflowImage,
+  compressRustElfSectionNames,
   RUSTC_HASH,
   rustDependencyPayload,
 } from "../../fixtures/rust/image.js";
@@ -117,6 +118,44 @@ it("ignores PE file-alignment padding after the dependency content", () => {
   });
 });
 
+it("recognizes zero-virtual-size PE raw padding without accepting payload junk", () => {
+  const payloadBytes = rustDependencyPayload().length;
+  const entry = 264;
+  const bytes = createRustImage({ format: "pe", includeRustc: false });
+  bytes.writeUInt32LE(0, entry + 8);
+  bytes.writeUInt32LE(512, entry + 16);
+  bytes.writeUInt32LE(512, 188); // Optional-header FileAlignment.
+  expect(readRustBinaryImage(bytes).auditable_metadata).toMatchObject({
+    section_bytes: 512,
+    compressed_bytes: payloadBytes,
+    packages,
+  });
+
+  const payloadOffset = bytes.readUInt32LE(entry + 20);
+  const nonzeroSuffix = Buffer.from(bytes);
+  nonzeroSuffix[payloadOffset + payloadBytes] = 1;
+  expect(() => readRustBinaryImage(nonzeroSuffix)).toThrow(
+    /bytes after the zlib stream/u,
+  );
+
+  const truncated = Buffer.from(bytes);
+  truncated[payloadOffset + payloadBytes - 1] =
+    truncated[payloadOffset + payloadBytes - 1]! ^ 0xff;
+  expect(() => readRustBinaryImage(truncated)).toThrow(/complete zlib stream/u);
+
+  const nonzeroVirtualSize = Buffer.from(bytes);
+  nonzeroVirtualSize.writeUInt32LE(payloadBytes + 1, entry + 8);
+  expect(() => readRustBinaryImage(nonzeroVirtualSize)).toThrow(
+    /bytes after the zlib stream/u,
+  );
+
+  const unknownAlignment = Buffer.from(bytes);
+  unknownAlignment.writeUInt32LE(0, 188);
+  expect(() => readRustBinaryImage(unknownAlignment)).toThrow(
+    /bytes after the zlib stream/u,
+  );
+});
+
 it("returns null metadata when the dependency section is absent", () => {
   const image = readRustBinaryImage(
     createRustImage({ format: "elf", omitSection: true }),
@@ -125,6 +164,66 @@ it("returns null metadata when the dependency section is absent", () => {
   expect(image.rustc_commit?.hashes).toEqual([
     { hash: RUSTC_HASH, file_offset: 2048 },
   ]);
+});
+
+it("reads dependency metadata through a compressed ELF section-name table", () => {
+  const image = readRustBinaryImage(
+    compressRustElfSectionNames(createRustImage({ format: "elf" })),
+  );
+  expect(image.auditable_metadata).toMatchObject({
+    section_name: ".dep-v0",
+    file_offset: 1024,
+    packages,
+    dependency_edges: [{ from_index: 1, to_index: 0 }],
+  });
+});
+
+it("keeps dependency presence unknown for unsupported ELF name compression", () => {
+  const image = readRustBinaryImage(
+    compressRustElfSectionNames(createRustImage({ format: "elf" }), 2),
+  );
+  expect(image.auditable_metadata).toBeNull();
+  expect(image.section_names_limitation).toMatch(
+    /compression type 2 is unsupported/u,
+  );
+  expect(image.rustc_commit?.hashes).toEqual([
+    { hash: RUSTC_HASH, file_offset: 2048 },
+  ]);
+});
+
+it("keeps dependency presence unknown when its ELF name offset is unreadable", () => {
+  const bytes = createRustImage({ format: "elf" });
+  bytes.writeUInt32LE(0xffff, 384);
+
+  const image = readRustBinaryImage(bytes);
+  expect(image.auditable_metadata).toBeNull();
+  expect(image.section_names_limitation).toMatch(/outside its string table/u);
+  expect(image.rustc_commit?.hashes).toEqual([
+    { hash: RUSTC_HASH, file_offset: 2048 },
+  ]);
+});
+
+it("finds rustc paths in read-only ELF load data without section headers", () => {
+  const bytes = createRustImage({
+    format: "elf",
+    omitSection: true,
+    includeRustc: true,
+  });
+  bytes.writeBigUInt64LE(0n, 40);
+  bytes.writeUInt16LE(0, 60);
+  bytes.writeUInt16LE(0, 62);
+  bytes.writeUInt32LE(4, 132); // PF_R, no write or execute permission.
+
+  expect(readRustBinaryImage(bytes)).toMatchObject({
+    auditable_metadata: null,
+    rustc_commit: {
+      evidence_kind: "inferred",
+      hashes: [{ hash: RUSTC_HASH, file_offset: 2048 }],
+    },
+  });
+
+  bytes.writeUInt32LE(6, 132); // PF_R | PF_W is not read-only data.
+  expect(readRustBinaryImage(bytes).rustc_commit).toBeNull();
 });
 
 it("refuses a universal Mach-O container", () => {

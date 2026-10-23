@@ -307,6 +307,44 @@ describe("Interface Builder parser bounds", () => {
 });
 
 describe("keyed archive identity decoding", () => {
+  it("uses object-table indexes when authored archiveUID fields collide", () => {
+    const parsed = parseInterfaceBuilderRecords({
+      $archiver: "NSKeyedArchiver",
+      $version: 100000,
+      $objects: [
+        "$null",
+        { archiveUID: 2, title: "First", $class: { UID: 4 } },
+        { title: "Second", $class: { UID: 4 } },
+        {
+          NSSource: { UID: 2 },
+          NSDestination: { UID: 1 },
+          NSLabel: "peer",
+          $class: { UID: 5 },
+        },
+        {
+          $classname: "ArchiveProbeView",
+          $classes: ["ArchiveProbeView", "NSView", "NSObject"],
+        },
+        {
+          $classname: "NSNibOutletConnector",
+          $classes: ["NSNibOutletConnector", "NSObject"],
+        },
+      ],
+      $top: { root: { UID: 1 } },
+    });
+
+    expect(parsed.objects.map(({ id }) => id)).toEqual(["1", "2", "3"]);
+    expect(parsed.objects[0]?.attributes).toMatchObject({ archiveUID: 2 });
+    expect(parsed.connections).toContainEqual(
+      expect.objectContaining({
+        kind: "outlet",
+        source_id: "2",
+        destination_id: "1",
+        label: "peer",
+      }),
+    );
+  });
+
   it("preserves keyed archive UID identities, arrays, and control actions", () => {
     const parsed = parseInterfaceBuilderRecords({
       $archiver: "NSKeyedArchiver",
@@ -470,6 +508,61 @@ describe("Interface Builder graph limits", () => {
     );
   });
 });
+
+it.each([
+  { relativePath: "Main.nib", sourceId: "missing" },
+  { relativePath: "Views/:hierarchy:/Main.nib", sourceId: "missing" },
+  { relativePath: "Main.nib", sourceId: "missing:hierarchy:source" },
+])(
+  "keeps connection omissions separate from complete hierarchy for $relativePath / $sourceId",
+  ({ relativePath, sourceId }) => {
+    const result = buildInterfaceBuilderAnalysis({
+      targetSha256: hash,
+      toolVersion: "test",
+      documents: [
+        {
+          relativePath,
+          archiveSha256: hash,
+          documentKind: "nib",
+          raw: {
+            "com.apple.ibtool.document.objects": {
+              kept: { class: "UIView" },
+            },
+            "com.apple.ibtool.document.hierarchy": [{ objectID: "kept" }],
+            "com.apple.ibtool.document.connections": {
+              [sourceId]: [
+                { type: "outlet", label: "view", destinationId: "kept" },
+              ],
+            },
+          },
+        },
+      ],
+      limits: interfaceBuilderLimitsSchema.parse({ max_objects: 2 }),
+    });
+    expect(result.documents[0]?.hierarchy_complete).toBe(true);
+    expect(result.graph.nodes).toHaveLength(2);
+    expect(result.graph.edges).toHaveLength(1);
+    expect(result.graph.truncated).toBe(true);
+    expect(result.graph.coverage).toEqual(
+      expect.arrayContaining([
+        {
+          facet: `hierarchy:${relativePath}`,
+          status: "complete",
+          reason: null,
+          examined: 1,
+          omitted: 0,
+        },
+        {
+          facet: `connections:${relativePath}`,
+          status: "partial",
+          reason: "connection_limit_reached",
+          examined: 1,
+          omitted: 2,
+        },
+      ]),
+    );
+  },
+);
 
 describe("Interface Builder hierarchy completeness", () => {
   it("marks only the later document incomplete when its hierarchy root is omitted", () => {

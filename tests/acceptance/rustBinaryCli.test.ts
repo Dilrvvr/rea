@@ -8,6 +8,7 @@ import { expect } from "vitest";
 import { toolContract } from "../../src/contracts/toolContracts.js";
 import { machoImageWithUnknownCommand } from "../../src/artifacts/apple/MachoImage.fixture.js";
 import {
+  compressRustElfSectionNames,
   createRustImage,
   createRustImageWithGoSection,
   RUSTC_HASH,
@@ -259,6 +260,57 @@ cliTest("returns null metadata when .dep-v0 is absent", async ({ cli }) => {
 });
 
 cliTest(
+  "reads compressed ELF names and keeps unsupported compression unknown",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory(
+      "rea-rust-elf-compressed-names-",
+    );
+    for (const fixture of [
+      { name: "zlib", type: 1, supported: true },
+      { name: "unknown", type: 2, supported: false },
+    ]) {
+      const path = join(root, `${fixture.name}.elf`);
+      await writeFile(
+        path,
+        compressRustElfSectionNames(
+          createRustImage({ format: "elf" }),
+          fixture.type,
+        ),
+      );
+      const result = await cli.run({
+        arguments: ["inspect-rust-binary", path, "--json"],
+      });
+      expect(result.exitCode, result.stderr).toBe(0);
+      const evidence = toolContract("inspect_rust_binary").outputSchema.parse(
+        result.json,
+      );
+      const report = rustBinarySchema.parse(evidence.normalized_result);
+      if (fixture.supported) {
+        expect(report.auditable_metadata).toMatchObject({
+          section_name: ".dep-v0",
+          packages: [
+            { name: "itoa", version: "1.0.18" },
+            { name: "sample", version: "0.1.0", root: true },
+          ],
+          dependency_edges: [{ from_index: 1, to_index: 0 }],
+        });
+      } else {
+        expect(report.auditable_metadata).toBeNull();
+        expect(report.limitations.join("\n")).toContain(
+          "ELF section names are unavailable because compression type 2 is unsupported",
+        );
+        expect(report.limitations.join("\n")).toContain(
+          "The presence of .dep-v0 could not be determined",
+        );
+        expect(report.limitations.join("\n")).not.toContain(
+          "No .dep-v0 section was found",
+        );
+      }
+    }
+  },
+);
+
+cliTest(
   "keeps arm64_32 in Rust CLI Evidence when dependency metadata is absent",
   async ({ cli }) => {
     const root = await createTestTempDirectory("rea-rust-arm64-32-");
@@ -341,6 +393,135 @@ cliTest("reports malformed zlib as invalid input", async ({ cli }) => {
     details: { operation: "inspect_rust_binary" },
   });
 });
+
+cliTest(
+  "rejects duplicate Rust dependency JSON through CLI and stdio MCP",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-rust-cli-duplicate-json-");
+    const { client, call } = await connectLocalToolsMcp();
+    const path = join(root, "duplicate.elf");
+    await writeFile(
+      path,
+      createRustImage({
+        format: "elf",
+        payload: deflateSync(Buffer.from('{"packages":[],"packages":[]}')),
+        includeRustc: false,
+      }),
+    );
+
+    const result = await cli.run({
+      arguments: ["inspect-rust-binary", path, "--json"],
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.json).toMatchObject({
+      code: "invalid_request",
+      details: { operation: "inspect_rust_binary" },
+    });
+    const response = await call("inspect_rust_binary", { path });
+    expect(parseMcpToolError(response).error).toMatchObject({
+      code: "invalid_request",
+      details: { operation: "inspect_rust_binary" },
+    });
+    await client.ping();
+  },
+  30000,
+);
+
+cliTest(
+  "reads PE cargo-auditable data padded to FileAlignment through CLI and MCP",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-rust-cli-pe-padding-");
+    const { client, call } = await connectLocalToolsMcp();
+    const path = join(root, "padded.exe");
+    const bytes = createRustImage({ format: "pe", includeRustc: false });
+    const compressedBytes = rustDependencyPayload().length;
+    const alignedSize = 512;
+    expect(compressedBytes).toBeLessThan(alignedSize);
+    bytes.writeUInt32LE(alignedSize, 152 + 36); // OptionalHeader.FileAlignment
+    bytes.writeUInt32LE(0, 264 + 8); // .dep-v0 VirtualSize
+    bytes.writeUInt32LE(alignedSize, 264 + 16); // .dep-v0 SizeOfRawData
+    await writeFile(path, bytes);
+
+    const result = await cli.run({
+      arguments: ["inspect-rust-binary", path, "--json"],
+    });
+    expect(result.exitCode, result.stderr).toBe(0);
+    const evidence = toolContract("inspect_rust_binary").outputSchema.parse(
+      result.json,
+    );
+    const metadata = rustBinarySchema.parse(
+      evidence.normalized_result,
+    ).auditable_metadata;
+    expect(metadata).toMatchObject({
+      section_bytes: alignedSize,
+      compressed_bytes: compressedBytes,
+      packages: [
+        { name: "itoa", version: "1.0.18" },
+        { name: "sample", version: "0.1.0", root: true },
+      ],
+    });
+    expect(metadata?.uncompressed_bytes).toBeLessThanOrEqual(
+      (metadata?.compressed_bytes ?? 0) * 64,
+    );
+    expect(evidence.locations).toContainEqual({
+      kind: "file-offset-range",
+      start: metadata?.file_offset,
+      end: (metadata?.file_offset ?? 0) + alignedSize,
+    });
+    const response = await call("inspect_rust_binary", { path });
+    expect(response.isError, JSON.stringify(response)).not.toBe(true);
+    expect(response.structuredContent).toEqual(evidence);
+    await client.ping();
+  },
+  30000,
+);
+
+cliTest(
+  "limits PE inflate ratio by consumed zlib bytes through CLI and stdio MCP",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-rust-cli-pe-ratio-");
+    const { client, call } = await connectLocalToolsMcp();
+    const path = join(root, "over-ratio.exe");
+    const document = Buffer.concat([
+      Buffer.from(JSON.stringify({ packages: [] })),
+      Buffer.alloc(24 * 1024, 0x20),
+    ]);
+    const compressed = deflateSync(document);
+    const alignedSize = 512;
+    expect(compressed.length).toBeLessThan(alignedSize);
+    expect(document.length).toBeGreaterThan(compressed.length * 64);
+    expect(document.length).toBeLessThanOrEqual(alignedSize * 64);
+
+    const bytes = createRustImage({
+      format: "pe",
+      payload: compressed,
+      includeRustc: false,
+    });
+    bytes.writeUInt32LE(alignedSize, 152 + 36); // OptionalHeader.FileAlignment
+    bytes.writeUInt32LE(0, 264 + 8); // .dep-v0 VirtualSize
+    bytes.writeUInt32LE(alignedSize, 264 + 16); // .dep-v0 SizeOfRawData
+    await writeFile(path, bytes);
+
+    const expectedFailure = {
+      code: "resource_constraint",
+      retryable: false,
+      details: {
+        operation: "inspect_rust_binary",
+        resource: "memory",
+        reported_limits: { maximum_bytes: compressed.length * 64 },
+      },
+    };
+    const result = await cli.run({
+      arguments: ["inspect-rust-binary", path, "--json"],
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.json).toMatchObject(expectedFailure);
+    const response = await call("inspect_rust_binary", { path });
+    expect(parseMcpToolError(response).error).toMatchObject(expectedFailure);
+    await client.ping();
+  },
+  30000,
+);
 
 cliTest(
   "releases a failed Rust descriptor close before projecting the CLI failure",

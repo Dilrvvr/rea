@@ -7,12 +7,15 @@ import {
 import { assertArtifactReadActive } from "../artifacts/ArtifactFileOperation.js";
 import {
   gpuCount,
+  GPU_OBJECT_BYTES,
   GPU_REPORT_BYTES,
   rejectGpu,
   type GpuSource,
 } from "./GpuSource.js";
 import { gpuObject } from "./GpuObject.js";
+import { isAmdGpuBundleId, readAmdGpuBundleTarget } from "./AmdGpuTarget.js";
 export const CLANG_BUNDLE_MAGIC = Buffer.from("__CLANG_OFFLOAD_BUNDLE__");
+export const CCOB_MAGIC = Buffer.from("CCOB");
 export const readClangBundleDirectory = async (
   source: GpuSource,
   base: number,
@@ -62,16 +65,13 @@ export const readClangBundleDirectory = async (
       size,
       kind: name.startsWith("host-")
         ? "host"
-        : /^(?:hip|hipv4)-amdgcn-/u.test(name)
+        : isAmdGpuBundleId(name)
           ? "amdgpu"
           : "unknown",
       metadata: { offset: position, size: 24 + nameSize },
     });
     row.bundle_id = name;
-    row.target =
-      /-(?:-)?(gfx[a-zA-Z0-9]+(?:(?::[^\s]+)|(?:\+[a-zA-Z0-9_-]+))*)$/u.exec(
-        name,
-      )?.[1] ?? null;
+    row.target = readAmdGpuBundleTarget(name);
     objects.push(row);
     position += 24 + nameSize;
   }
@@ -86,6 +86,8 @@ export const readClangBundleDirectory = async (
 };
 export const readCcobHeader = (bytes: Buffer, remaining: number) => {
   if (bytes.length < 20) rejectGpu("CCOB header is truncated");
+  if (!bytes.subarray(0, CCOB_MAGIC.length).equals(CCOB_MAGIC))
+    rejectGpu("Invalid CCOB magic");
   const version = bytes.readUInt16LE(4),
     method = bytes.readUInt16LE(6);
   let width: number, total: number, decoded: number, hash: bigint;
@@ -114,4 +116,32 @@ export const readCcobHeader = (bytes: Buffer, remaining: number) => {
   if (total < width || total > remaining)
     rejectGpu("CCOB declared extent is invalid");
   return { version, method, width, total, decoded, hash };
+};
+
+/** After failed/unsupported v1 decoding only: a marker is an uncertain recovery candidate. */
+export const findLegacyCcobRecoveryTotal = async (
+  source: GpuSource,
+  base: number,
+): Promise<number> => {
+  const searchEnd = Math.min(source.size, base + GPU_OBJECT_BYTES);
+  let position = base + 20;
+  let tail: Buffer = Buffer.alloc(0);
+  while (position < searchEnd) {
+    const bytes = await source.read(
+      position,
+      Math.min(64 * 1024, searchEnd - position),
+    );
+    const haystack = tail.length === 0 ? bytes : Buffer.concat([tail, bytes]);
+    const index = haystack.indexOf("CCOB");
+    if (index >= 0) return position - tail.length + index - base;
+    tail = haystack.subarray(Math.max(0, haystack.length - 3));
+    position += bytes.length;
+  }
+  if (searchEnd < source.size)
+    throw new BinaryResourceFailure(
+      "structure",
+      GPU_OBJECT_BYTES,
+      "Legacy CCOB v1 extent exceeds the 128 MiB decoding budget",
+    );
+  return source.size - base;
 };

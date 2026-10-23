@@ -7,6 +7,7 @@ import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 
 import { analyzeJavaScriptApplication } from "../../support/javascriptApplicationScope.js";
 import { parseApplicationGraphEvidence } from "../../../src/application/javascript/JavaScriptApplicationEvidenceGraph.js";
+import { compareJavaScriptExportShapesEvidence } from "../../../src/application/javascript/JavaScriptApplicationWorkflowService.js";
 import { compareJavaScriptExportShapes } from "../../../src/domain/javascript/javascriptExportShapeComparison.js";
 import {
   javaScriptExportShapeComparisonResultSchema,
@@ -40,6 +41,18 @@ describe("JavaScript export return-shape comparison", () => {
 
     const first = compare(left, right);
     const second = compare(left, right);
+    const execution = compareJavaScriptExportShapesEvidence({
+      left: left.evidence,
+      right: right.evidence,
+      left_module_path: "parser.mjs",
+      left_export_name: "default",
+      right_module_path: "parser.mjs",
+      right_export_name: "default",
+    });
+    if (!execution.ok) throw execution.error;
+    expect(execution.value.result).toEqual(first);
+    expect(execution.value.sources[0]).toBe(left.evidence);
+    expect(execution.value.sources[1]).toBe(right.evidence);
 
     expect(first.comparison_id).toBe(second.comparison_id);
     expect(() =>
@@ -70,6 +83,41 @@ describe("JavaScript export return-shape comparison", () => {
     });
     expect(first.limitations).toContain(
       "This static comparison cannot establish runtime semantics; run behavioral probes directly against the relevant application versions when that evidence is required.",
+    );
+  });
+
+  it("preserves accessor-effect uncertainty through analyzed Evidence and export comparison", async () => {
+    const [left, right] = await analyzeSources({
+      left: `export default function observe() {
+        const box = { value: 1, get trigger() { this.value = 2; return 0; } };
+        box.trigger;
+        return { type: "event", value: box.value, stable: "kept" };
+      }`,
+      right: `export default function observe() {
+        return { type: "event", value: 2, stable: "kept" };
+      }`,
+    });
+    const execution = compareJavaScriptExportShapesEvidence({
+      left: left.evidence,
+      right: right.evidence,
+      left_module_path: "parser.mjs",
+      left_export_name: "default",
+      right_module_path: "parser.mjs",
+      right_export_name: "default",
+    });
+    if (!execution.ok) throw execution.error;
+    expect(execution.value.result.changes).toEqual([
+      expect.objectContaining({
+        status: "unknown",
+        path: "/value",
+        left: expect.objectContaining({ availability: "unknown" }),
+        right: { availability: "literal", value: 2 },
+      }),
+    ]);
+    expect(execution.value.sources).toContain(left.evidence);
+    expect(execution.value.result.coverage.status).toBe("partial");
+    expect(inventoryProperties(execution.value.result, "left", 0)).toEqual(
+      expect.arrayContaining(["/stable", "/value", "/type"]),
     );
   });
 

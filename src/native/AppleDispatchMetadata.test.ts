@@ -120,6 +120,52 @@ const fixture = (
 };
 const provenance = { path: "/fixture/app", sha256: "a".repeat(64) };
 
+it("retains Objective-C++ template commas in decoded property facts", () => {
+  const attributes = "T{vector<float, float, float>=},N,V_position";
+  const result = decodeAppleDispatchMetadata(
+    machoWithPropertyAttributes(attributes),
+    100,
+    provenance,
+  );
+  expect(result.objc_classes[0]?.properties).toEqual(
+    ["first", "second"].map((name) => ({
+      name,
+      type_encoding: "{vector<float, float, float>=}",
+      atomicity: "nonatomic",
+      attributes: [
+        { name: "T", value: "{vector<float, float, float>=}" },
+        { name: "N", value: "" },
+        { name: "V", value: "_position" },
+      ],
+      is_readonly: false,
+      getter: null,
+      setter: null,
+    })),
+  );
+  expect(
+    result.coverage.find(({ facet }) => facet === "objc_properties_categories"),
+  ).toMatchObject({ status: "complete" });
+});
+
+it("retains duplicate encoded method candidates without choosing one class-method address", () => {
+  const bytes = objcRecordBudgetMacho("class", [0x700, 0x720]);
+  const result = decodeAppleDispatchMetadata(bytes, 100, provenance);
+  expect(
+    result.objc_dispatch_implementations.map(
+      ({ implementation_address }) => implementation_address,
+    ),
+  ).toEqual(["0x100000700", "0x100000720"]);
+  expect(result.objc_classes[0]?.methods).toEqual([
+    {
+      selector: "classMethod",
+      method_type: "instance",
+      address: null,
+      is_required: null,
+      is_optional: null,
+    },
+  ]);
+});
+
 const swiftExternalSwiftBindingImage = (
   boundField: "protocol" | "type" | "objc-class" = "protocol",
 ) => {

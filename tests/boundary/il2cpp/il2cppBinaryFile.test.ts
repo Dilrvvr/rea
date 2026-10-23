@@ -8,6 +8,7 @@ import { readIl2cppMetadataForLinking } from "../../../src/il2cpp/Il2cppMetadata
 import {
   createElfFixture,
   createIl2cppBinaryFixture,
+  createIl2cppDyldBindFixture,
   createUniversalFixture,
   createSplitPointerPeFixture,
   FIXTURE_BINARY_BASE,
@@ -15,10 +16,13 @@ import {
   FIXTURE_RETURN_TYPE_NAME,
   type Il2cppBinaryFixtureOptions,
 } from "../../fixtures/il2cpp/binary.js";
-import { createIl2cppMetadataFixture } from "../../fixtures/il2cpp/metadata.js";
+import {
+  createIl2cppMetadataFixture,
+  createLinkedIl2cppMetadataFixture,
+} from "../../fixtures/il2cpp/metadata.js";
 
 const { metadata, link: facts } = readIl2cppMetadataForLinking(
-  createIl2cppMetadataFixture().bytes,
+  createLinkedIl2cppMetadataFixture().bytes,
 );
 const expectedAddress = (value: bigint | "no-body" | "unknown") =>
   typeof value === "bigint"
@@ -40,6 +44,27 @@ const failure = (bytes: Buffer, architecture?: string) => {
     throw cause;
   }
   throw new Error("expected a link failure");
+};
+const addElfLoadAlias = (
+  bytes: Buffer,
+  fileOffset: number,
+  address: bigint,
+  size: number,
+) => {
+  const withAlias = Buffer.from(bytes);
+  const count = withAlias.readUInt16LE(56);
+  const at = 64 + count * 56;
+  withAlias.writeUInt16LE(count + 1, 56);
+  withAlias.writeUInt32LE(1, at);
+  withAlias.writeUInt32LE(7, at + 4);
+  withAlias.writeBigUInt64LE(BigInt(fileOffset), at + 8);
+  withAlias.writeBigUInt64LE(address, at + 16);
+  withAlias.writeBigUInt64LE(address, at + 24);
+  const mappingSize = size === 0 ? withAlias.length : size;
+  withAlias.writeBigUInt64LE(BigInt(mappingSize), at + 32);
+  withAlias.writeBigUInt64LE(BigInt(mappingSize), at + 40);
+  withAlias.writeBigUInt64LE(0x1000n, at + 48);
+  return withAlias;
 };
 
 it("links methods to code through module tokens, not metadata order", () => {
@@ -74,6 +99,43 @@ it("links methods to code through module tokens, not metadata order", () => {
       name: FIXTURE_RETURN_TYPE_NAME,
     })),
   );
+});
+
+it.each([
+  ["an identical range", 0, FIXTURE_BINARY_BASE, 0],
+  ["a containing subrange", 0x400, FIXTURE_BINARY_BASE + 0x400n, 0x80],
+] as const)(
+  "counts one registration through %s only once",
+  (_, offset, address, size) => {
+    const bytes = addElfLoadAlias(
+      createElfFixture(createIl2cppBinaryFixture()),
+      offset,
+      address,
+      size,
+    );
+
+    expect(link(bytes).method_addresses).toEqual(expectedAddresses);
+  },
+);
+
+it("still rejects distinct CodeRegistration module table fields", () => {
+  expect(
+    failure(
+      createElfFixture(
+        createIl2cppBinaryFixture({ duplicateCodeRegistration: true }),
+      ),
+    ),
+  ).toEqual({ reason: "code-registration-not-found", kind: "malformed" });
+});
+
+it("still rejects distinct MetadataRegistration fields", () => {
+  expect(
+    failure(
+      createElfFixture(
+        createIl2cppBinaryFixture({ duplicateMetadataRegistration: true }),
+      ),
+    ),
+  ).toEqual({ reason: "metadata-registration-not-found", kind: "malformed" });
 });
 
 it("rejects reused MethodDef tokens within an image but preserves cross-image reuse and folded addresses", () => {
@@ -172,6 +234,38 @@ it("reports type indices without names for metadata version 27", () => {
   expect(rows.every((row) => row.name === null)).toBe(true);
   expect(link(createIl2cppBinaryFixture()).return_types[0]?.name).toBe(
     FIXTURE_RETURN_TYPE_NAME,
+  );
+});
+
+it("renders nested generic arguments on the components that declare them", () => {
+  const renderedName = (
+    typeNames: Readonly<Record<number, string>>,
+    genericTypeArgumentCounts: Readonly<Record<number, number>>,
+    genericArgumentTypeIndices: readonly number[],
+  ) => {
+    const { metadata: nestedMetadata, link: nestedFacts } =
+      readIl2cppMetadataForLinking(
+        createLinkedIl2cppMetadataFixture({
+          typeNames,
+          typeNamespaces: { 0: "Game", 1: "" },
+          genericTypeArgumentCounts,
+        }).bytes,
+      );
+    return linkIl2cppBinary(
+      createIl2cppBinaryFixture({
+        genericDefinitionTypeIndex: 1,
+        genericArgumentTypeIndices,
+      }),
+      nestedMetadata,
+      nestedFacts,
+    ).return_types[0]?.name;
+  };
+
+  expect(
+    renderedName({ 0: "Outer`1", 1: "Inner`2" }, { 0: 1, 1: 2 }, [3, 3]),
+  ).toBe("Game.Outer<int>+Inner<int>[]");
+  expect(renderedName({ 0: "Outer`1", 1: "Leaf`1" }, { 0: 1, 1: 1 }, [3])).toBe(
+    "Game.Outer<int>+Leaf[]",
   );
 });
 
@@ -428,6 +522,11 @@ it("rejects a recursive binary type graph without overflowing the JavaScript sta
 });
 
 it("guards a shared generic expansion before concatenating unchecked text", () => {
+  const expanded = readIl2cppMetadataForLinking(
+    createLinkedIl2cppMetadataFixture({
+      genericTypeArgumentCounts: { 3: 2 },
+    }).bytes,
+  );
   const bytes = Buffer.alloc(0x4000);
   createIl2cppBinaryFixture().copy(bytes);
   bytes.writeBigUInt64LE(BigInt(bytes.length), 64);
@@ -448,11 +547,17 @@ it("guards a shared generic expansion before concatenating unchecked text", () =
   }
   bytes.writeBigUInt64LE(prior, 0x900);
   const stopped = new Error("type text admission");
-  const steps = linkIl2cppBinarySteps(bytes, metadata, facts, undefined, {
-    beforeText: (size) => {
-      if (size > 1024) throw stopped;
+  const steps = linkIl2cppBinarySteps(
+    bytes,
+    expanded.metadata,
+    expanded.link,
+    undefined,
+    {
+      beforeText: (size) => {
+        if (size > 1024) throw stopped;
+      },
     },
-  });
+  );
   expect(() => {
     for (;;) {
       if (steps.next().done) break;
@@ -472,6 +577,45 @@ it("reports a symbol-relocated method slot as unknown rather than no-body", () =
   expect(linked.method_addresses[1]).toEqual(expectedAddress("unknown"));
   expect(linked.method_addresses[0]).toEqual(expectedAddresses[0]);
 });
+
+it.each([0n, FIXTURE_BINARY_BASE + 0x210n])(
+  "keeps a dyld-bound method slot unknown regardless of its raw word %s",
+  (raw) => {
+    const linked = link(createIl2cppDyldBindFixture(raw));
+    expect(linked.method_addresses[1]).toEqual(expectedAddress("unknown"));
+    expect(linked.method_addresses[0]).toEqual(expectedAddresses[0]);
+    expect(linked.method_addresses[4]).toEqual(expectedAddress("no-body"));
+  },
+);
+
+it("keeps unbound Mach-O method words classified from their values", () => {
+  const linked = link(createIl2cppBinaryFixture());
+  expect(linked.method_addresses[1]).toEqual(expectedAddresses[1]);
+  expect(linked.method_addresses[4]).toEqual(expectedAddress("no-body"));
+});
+
+it.each([
+  ["PC32", 2],
+  ["ABS32", 10],
+] as const)(
+  "keeps a method pointer beside a non-overlapping %s relocation",
+  (_, kind) => {
+    const binary = createIl2cppBinaryFixture();
+    const adjacent = createElfFixture(binary, {
+      machine: 62,
+      unresolvedRelocations: [{ offset: 0x2fc, kind }],
+    });
+    expect(link(adjacent).method_addresses).toEqual(expectedAddresses);
+
+    const overlapping = createElfFixture(binary, {
+      machine: 62,
+      unresolvedRelocations: [{ offset: 0x300, kind }],
+    });
+    expect(link(overlapping).method_addresses[1]).toEqual(
+      expectedAddress("unknown"),
+    );
+  },
+);
 
 it("reads a relative relocation into a zero-filled pointer array as a known value", () => {
   const bytes = createElfFixture(createIl2cppBinaryFixture(), {

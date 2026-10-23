@@ -1,3 +1,4 @@
+import { isSelectedRegularFileError } from "../../filesystem/RegularFile.js";
 import { ArtifactReaderFailure } from "../../artifacts/ArtifactReader.js";
 import { readStableArtifact } from "../../artifacts/readStableArtifact.js";
 import {
@@ -27,7 +28,7 @@ import {
 import { ProviderAdapterError } from "../../domain/providerAdapterError.js";
 import { ProviderCleanupError } from "../../domain/providerCleanupError.js";
 import { err, ok } from "../../domain/result.js";
-import { NATIVE_EXPORTS_PROVIDER } from "../../application/InvestigationProviders.js";
+import { NATIVE_EXPORTS_PROVIDER } from "../../domain/investigationProviders.js";
 import {
   BinaryFormatFailure,
   BinaryResourceFailure,
@@ -161,11 +162,7 @@ const nativeExportsFailurePrimary = (
       return new AnalysisAccessDeniedError(OPERATION, input.path, cause.code, {
         cause,
       });
-    if (
-      ["ENOENT", "ENOTDIR", "ELOOP", "ENAMETOOLONG"].includes(
-        String(cause.code),
-      )
-    )
+    if (isSelectedRegularFileError(cause))
       return new AnalysisInputError(OPERATION, { cause }, [
         {
           path: ["path"],

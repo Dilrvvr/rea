@@ -212,6 +212,11 @@ linked method table or seed output is published. Row ids may repeat across
 different images, and distinct rows may still resolve to the same address when
 the binary uses identical-code folding.
 
+For ELF, a repeated load mapping that resolves a complete module record to the
+same virtual address and file bytes contributes one record. Distinct virtual
+record addresses remain distinct candidates, and conflicting file mappings
+remain malformed.
+
 Module records establish names through their declared NUL-terminated string pointers. NUL/0xFF padding, spaces, Unicode and suffix-shared storage are supported. A pointer to a longer string does not match just its suffix; a pointer directly into a shared suffix may name it. Exact reversed UTF-8 matching avoids rescanning the file for every name and retains duplicate-name owners until module records resolve them. A contributor investigated a Linux
 `GameAssembly.so` from Unity 2023.2.13f1 whose static registration was not located. When no static pair is resolved on x86-64, the reader searches executable ranges for bytes consistent with RIP-relative LEA/MOV references to module-array candidates. Exactly one referenced array candidate must remain. `code_gen_modules_field` is then `null`, and Evidence is **inferred**: instruction boundaries, the absence of a static registration elsewhere, and runtime use were not verified. The module records and slots themselves remain file observations. Static-table associations are **derived**. Otherwise the result is `code-registration-not-found`.
 
@@ -243,7 +248,9 @@ The result adds:
   `rva` (address minus `image_base`), both hexadecimal strings. `state` is
   `code` when the module slot holds an unambiguously mapped executable address, `no-body` when an observed slot is zero,
   as for abstract, extern and most generic methods, and `unknown` when no type
-  range in any image holds the method or a symbol relocation leaves its slot unresolved.
+  range in any image holds the method, a symbol relocation leaves its slot
+  unresolved, or dyld will bind a Mach-O slot. The raw word in a dyld-bound
+  slot is not treated as the resolved address.
   `address` and `rva` are `null` unless `state` is `code`. The summary counts
   each state in `counts.method_address_states`. Ghidra seeds are written only
   for `code` rows.
@@ -255,8 +262,10 @@ The result adds:
   definitions, `T[]` for vectors, `T[*]` for rank-one multidimensional arrays,
   `T[,]` for rank-two arrays and `T*`, generic instances as
   `System.Collections.Generic.List<string>` and generic parameters by their
-  metadata name (`TKey`). A trailing `&` marks a by-reference type. `name` is
-  `null` only for type index `-1`.
+  metadata name (`TKey`). Nested generic arguments stay with the component
+  that declares them, for example `Game.Outer<int>+Inner<string>` or
+  `Game.Outer<int>+Leaf` when the nested type adds no parameters. A trailing
+  `&` marks a by-reference type. `name` is `null` only for type index `-1`.
 
 `binary` also records `types_field` and `types_count`: the address of
 `Il2CppMetadataRegistration.typesCount` and its value. That record is found as
@@ -293,7 +302,7 @@ Format and selection failures name `binary_path`; capacity refusals remain typed
 
 Scans yield cooperatively in bounded batches. Name-address retention and reverse-trie construction are each limited to65,536 entries/nodes and fallback module-array candidates to64 (`native-index-capacity`); exceeding capacity does not prove absence. Rendered type text has a64MiB UTF-8 cache-workspace guard, separate from the64MiB encoded-report admission, and64 nested rendering frames (`native-type-text-capacity` / `type-nesting-capacity`). Genuine cycles are malformed; unsupported type kinds are explicit coverage failures. Native row/text admission runs before allocation or retention. Unused generic parameter names are read on demand from the same stable metadata snapshot. There is no cross-inspection file cache; validated immutable Evidence is reused for session views.
 
-ELF RELATIVE writes into zero-fill are kept as a private virtual-pointer overlay. Unresolved supported-width symbol relocations, including RELA PLT entries, remain unknown; stored zeros never establish no-body. COPY, TLS descriptor, REL, packed APS2 and other unsupported relocation encodings fail closed. Input bytes are unchanged.
+ELF RELATIVE writes into zero-fill are kept as a private virtual-pointer overlay. Unresolved supported-width symbol relocations, including RELA PLT entries, remain unknown only for the bytes their ELF ABI relocation type covers; an adjacent 32-bit relocation does not make a separate 64-bit method slot unknown. Stored zeros never establish no-body. COPY, TLS descriptor, REL, packed APS2 and other unsupported relocation encodings fail closed. Input bytes are unchanged.
 
 Native address queries batch exact64-bit hexadecimal `addresses` and `states` (`code`, `no-body`, `unknown`), intersecting indices and pagination. Numerically equal address spellings match; original row indices and every shared-body alternative survive:
 
@@ -359,16 +368,15 @@ message names one reason:
 | `nested-type-conflict`    | A type is listed as nested in two types, in itself, or in a cycle of declaring types.                            |
 | `declaring-type-mismatch` | A method inside a type's method range names a different type, or a method lies outside its type's range.         |
 | `image-range-overlap`     | Two images claim the same type definitions.                                                                      |
-| `invalid-string`          | A name index does not start a string, or the name is unterminated or not valid UTF-8.                            |
+| `invalid-string`          | A name index is outside the strings section, its string is unterminated, or it is not valid UTF-8.               |
 
 A version field that disagrees with the file's layout, for example a version
 39 file relabeled as 29, usually surfaces as `unexpected-header-size` or
 `record-size-mismatch`.
 
-Two checks are stricter than the IL2CPP runtime: a name index must start a
-string, and an empty range's start must lie between -1 and the collection size.
-Every Unity-written file checked so far satisfies both; metadata rewritten by
-other tools may be rejected.
+An empty range's start must lie between -1 and the collection size, which is
+stricter than some runtime paths. String indices are byte offsets; a valid
+offset may select a suffix of another NUL-terminated name.
 
 An incomplete inventory is never reported as complete. Failures after a verified
 snapshot retain partial source Evidence with its SHA-256, byte length and any

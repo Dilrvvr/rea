@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { open, stat, rename, writeFile } from "node:fs/promises";
+import { open, stat, rename, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import { createTestTempDirectory } from "../../../tests/fixtures/temporaryDirectory.js";
@@ -67,6 +67,83 @@ it("rejects missing files, non-files and windows beyond EOF, but accepts empty w
   expect(
     byteEntropySchema.parse(result.value.normalized_result).limitations,
   ).toContainEqual(expect.stringContaining("reports a size of 0"));
+});
+
+it.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
+  "projects real path-resolution failures as actionable input errors",
+  async () => {
+    const root = await createTestTempDirectory("rea-entropy-path-resolution-");
+    const loop = join(root, "loop");
+    await symlink("loop", loop);
+    const overlong = join(root, "x".repeat(256));
+    const cases = [
+      [loop, "ELOOP"],
+      [overlong, "ENAMETOOLONG"],
+    ] as const;
+    const service = new ByteEntropyService();
+    try {
+      for (const [path, code] of cases) {
+        let observedCode: unknown;
+        try {
+          await stat(path);
+        } catch (cause: unknown) {
+          observedCode =
+            cause instanceof Error && "code" in cause ? cause.code : undefined;
+        }
+        expect(observedCode).toBe(code);
+
+        const result = await service.inspect({ path });
+        if (result.ok) throw new Error(`Expected ${code} path failure`);
+        expect(result.error).toMatchObject({
+          _tag: "AnalysisInputError",
+          cause: { code },
+          issues: [
+            {
+              path: ["path"],
+              reason: "invalid_value",
+            },
+          ],
+        });
+        const projected = projectAnalysisError(result.error);
+        expect(projected).toMatchObject({
+          code: "invalid_request",
+          recovery: {
+            kind: "inspect_input_contract",
+            operation: "inspect_byte_entropy",
+          },
+          details: {
+            operation: "inspect_byte_entropy",
+            issues: [
+              {
+                path: ["path"],
+                reason: "invalid_value",
+                message: expect.stringContaining(code),
+              },
+            ],
+          },
+        });
+        expect(JSON.stringify(projected.details)).toContain(path);
+      }
+    } finally {
+      await service.close();
+    }
+  },
+);
+
+it.each([
+  [{ offset: 2048 }, "offset"],
+  [{ offset: 2048, length: 0 }, "offset"],
+  [{ offset: 512, length: 1024 }, "length"],
+])("names the selector that puts %o past EOF", async (window, field) => {
+  const root = await createTestTempDirectory("rea-entropy-window-");
+  const path = join(root, "bytes");
+  await writeFile(path, Buffer.alloc(1024));
+  const result = await new ByteEntropyService().inspect({ path, ...window });
+  if (result.ok) throw new Error("Expected an out-of-file window to fail");
+  expect(projectAnalysisError(result.error)).toMatchObject({
+    code: "invalid_request",
+    details: { issues: [{ path: [field], reason: "invalid_value" }] },
+  });
 });
 
 it.skipIf(process.platform !== "linux")(
