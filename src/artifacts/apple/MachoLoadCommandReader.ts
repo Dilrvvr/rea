@@ -1,3 +1,4 @@
+import { MachoLoadCommandCursor } from "../../domain/apple/machoLoadCommands.js";
 import type {
   MachoDependency,
   MachoImageFacts,
@@ -5,7 +6,10 @@ import type {
 } from "../../domain/apple/dylibResolution.js";
 import { machoCpuSubtypeBase } from "../../domain/apple/machoCpuIdentity.js";
 import {
-  machoLoadCommandAlignment,
+  legacyMachoPlatform,
+  type MachoVersionMinPlatform,
+} from "../../domain/apple/machoPlatform.js";
+import {
   classifyFatContainerIdentity,
   readFatContainerHeader,
   readFatSliceDeclarations,
@@ -53,53 +57,18 @@ const LC_LOAD_UPWARD_DYLIB = 0x80000023;
 const LC_RPATH = 0x8000001c;
 const LC_DYLD_ENVIRONMENT = 0x27;
 const LC_CODE_SIGNATURE = 0x1d;
-const LC_VERSION_MIN_MACOSX = 0x24;
-const LC_VERSION_MIN_IPHONEOS = 0x25;
-const LC_VERSION_MIN_TVOS = 0x2f;
-const LC_VERSION_MIN_WATCHOS = 0x30;
 const LC_BUILD_VERSION = 0x32;
 
-// `mach-o/loader.h` `PLATFORM_*` numbers observed via Apple linker output.
-const PLATFORM_MACOS = 1;
-const PLATFORM_IOS = 2;
-const PLATFORM_TVOS = 3;
-const PLATFORM_WATCHOS = 4;
-const PLATFORM_IOSSIMULATOR = 7;
-const PLATFORM_TVOSSIMULATOR = 8;
-const PLATFORM_WATCHOSSIMULATOR = 9;
-
-const CPU_TYPE_I386 = 7;
-const CPU_TYPE_X86_64 = 0x01000007;
 const CPU_TYPE_ARM64 = 0x0100000c;
 
-/**
- * Legacy `LC_VERSION_MIN_*` commands predate explicit simulator platform
- * IDs. Per Apple's dyld rules the image CPU type distinguishes simulator
- * from device: Intel images are simulator, ARM images are device
- * (tvOS simulator applies to x86_64 only). `LC_BUILD_VERSION` platform
- * numbers are preserved verbatim; unknown future numbers stay unknown
- * downstream, never mapped to nearest.
- */
-const legacyVersionMinPlatform = (
-  command: number,
-  cpuType: number,
-): number | undefined => {
-  const isIntel = cpuType === CPU_TYPE_I386 || cpuType === CPU_TYPE_X86_64;
-  switch (command) {
-    case LC_VERSION_MIN_MACOSX:
-      return PLATFORM_MACOS;
-    case LC_VERSION_MIN_IPHONEOS:
-      return isIntel ? PLATFORM_IOSSIMULATOR : PLATFORM_IOS;
-    case LC_VERSION_MIN_TVOS:
-      return cpuType === CPU_TYPE_X86_64
-        ? PLATFORM_TVOSSIMULATOR
-        : PLATFORM_TVOS;
-    case LC_VERSION_MIN_WATCHOS:
-      return isIntel ? PLATFORM_WATCHOSSIMULATOR : PLATFORM_WATCHOS;
-    default:
-      return undefined;
-  }
-};
+/** loader.h command codes and their device platform identities. */
+const VERSION_MIN_PLATFORMS: ReadonlyMap<number, MachoVersionMinPlatform> =
+  new Map([
+    [0x24, 1], // LC_VERSION_MIN_MACOSX
+    [0x25, 2], // LC_VERSION_MIN_IPHONEOS
+    [0x2f, 3], // LC_VERSION_MIN_TVOS
+    [0x30, 4], // LC_VERSION_MIN_WATCHOS
+  ]);
 
 /** `mach-o/loader.h` `dylib_use_command`: `nameoff == 28` and this marker. */
 const DYLIB_USE_MARKER = 0x1a741800;
@@ -427,7 +396,6 @@ const decodeCommands = (
   )[];
   readonly maxVmOffset: bigint;
 } => {
-  const view = viewOf(bytes);
   const slice: MachoSlice = {
     architecture: architectureName(header.cpuType, header.cpuSubtype),
     slice_offset: header.sliceOffset,
@@ -455,24 +423,17 @@ const decodeCommands = (
   let unreadableSegment: number | undefined;
   let lazyInfo = false;
   let lazyInfoCount = 0;
-  let offset = 0;
-  for (let index = 0; index < header.commandCount; index++) {
-    if (offset + 8 > bytes.byteLength)
-      throw new MachoFormatIssue(
-        "malformed",
-        `load command ${index} starts beyond sizeofcmds`,
-      );
-    const command = view.getUint32(offset, true);
-    const size = view.getUint32(offset + 4, true);
-    if (
-      size < 8 ||
-      size % machoLoadCommandAlignment(header.wide) !== 0 ||
-      offset + size > bytes.byteLength
-    )
-      throw new MachoFormatIssue(
-        "malformed",
-        `load command ${index} at offset ${offset} has invalid cmdsize ${size}`,
-      );
+  const commands = new MachoLoadCommandCursor({
+    wide: header.wide,
+    littleEndian: true,
+    commandCount: header.commandCount,
+    commandBytes: bytes.byteLength,
+  });
+  while (commands.nextOffset !== null) {
+    const offset = commands.nextOffset;
+    const frame = commands.read(bytes.subarray(offset, offset + 8));
+    if (!frame.ok) throw new MachoFormatIssue("malformed", frame.error);
+    const { index, command, size } = frame.value;
     const body = bytes.subarray(offset, offset + size);
     if (command === LC_SEGMENT || command === LC_SEGMENT_64) {
       const span = readSegmentSpan(body, command === LC_SEGMENT_64);
@@ -490,13 +451,9 @@ const decodeCommands = (
     }
     const decoded = decodeCommand(command, body, index, slice);
     if (decoded !== undefined) dependencies.push(decoded);
-    offset += size;
   }
-  if (offset !== bytes.byteLength)
-    throw new MachoFormatIssue(
-      "malformed",
-      `load commands declare ${header.commandCount} commands but sizeofcmds holds ${bytes.byteLength} bytes`,
-    );
+  const complete = commands.finish();
+  if (!complete.ok) throw new MachoFormatIssue("malformed", complete.error);
   if (lazyInfo && unreadableSegment !== undefined)
     throw new MachoFormatIssue(
       "malformed",
@@ -691,14 +648,14 @@ const decodeCommand = (
     slice.platforms.push(platform);
     return;
   }
-  const legacyPlatform = legacyVersionMinPlatform(command, slice.cpu_type);
+  const legacyPlatform = VERSION_MIN_PLATFORMS.get(command);
   if (legacyPlatform !== undefined) {
     if (body.byteLength < 16)
       throw new MachoFormatIssue(
         "malformed",
         `load command ${index} is too short for a version-min command`,
       );
-    slice.platforms.push(legacyPlatform);
+    slice.platforms.push(legacyMachoPlatform(legacyPlatform, slice.cpu_type));
     return;
   }
   if (command === LC_LAZY_LOAD_DYLIB_INFO)

@@ -16,6 +16,7 @@ import {
   elfFixture,
   ptxFixture,
   amdFixture,
+  amdNoteFixture,
   llvmBitcodeFixture,
 } from "../../fixtures/gpu/codeObjects.js";
 const inspect = async (
@@ -364,47 +365,127 @@ it.each(["amdgcn", "amdgpu9.00"])(
   },
 );
 it.each([
-  "amdgcn-amd-amdhsa-unknown-",
-  "amdgpu9.00-amd-amdhsa--",
-  "amdgpu9.00-amd-amdhsa-unknown-",
+  "producer-specific-gpu-target",
+  "amdgpu9.00-amd-amdhsa--gfx900:xnack",
 ])(
-  "compares AMDGPU note processor and feature declarations with %s",
-  async (prefix) => {
-    for (const comparison of ["match", "conflict", "feature-unknown"]) {
-      const payloadTarget = `${prefix}gfx900${comparison === "feature-unknown" ? ":xnack+" : ""}`;
-      const inventoryTarget = comparison === "conflict" ? "gfx1100" : "gfx900";
-      const bytes = hipFixture(
-        amdFixture(false, undefined, payloadTarget),
-        `hipv4-amdgcn-amd-amdhsa--${inventoryTarget}`,
+  "retains the unrecognized AMDGPU note target %s without substituting ELF processor flags",
+  async (noteTarget) => {
+    const result = await inspect(
+      hipFixture(amdFixture(false, undefined, noteTarget)),
+      { targets: ["gfx900"] },
+    );
+    if (!result.ok) throw result.error;
+    const row = result.value.objects.find(({ kind }) => kind === "amdgpu");
+    expect(row).toMatchObject({
+      target: "gfx900",
+      payload_target: noteTarget,
+      target_consistency: "unknown",
+      inspection: "complete",
+    });
+    expect(result.value.coverage.payloads).toBe("complete");
+    expect(result.value.kernels).toMatchObject([
+      { name: "add_one", parameter_bytes: 12, registers: { sgpr: 6, vgpr: 2 } },
+    ]);
+    expect(row?.limitations.join(" ")).not.toContain(
+      "Conflicting target declarations",
+    );
+    expect(result.value.kernels[0]?.limitations.join(" ")).not.toContain(
+      "Conflicting target declarations",
+    );
+  },
+);
+it("retains kernels from conflicting AMDGPU notes without choosing either note or ELF flags", async () => {
+  const bytes = amdFixture(
+    false,
+    amdNoteFixture(false, "amdgcn-amd-amdhsa--gfx1100"),
+  );
+  const result = await inspect(bytes);
+  if (!result.ok) throw result.error;
+  expect(result.value.objects).toMatchObject([
+    {
+      kind: "amdgpu",
+      target: null,
+      payload_target: null,
+      target_consistency: "unknown",
+      inspection: "partial",
+    },
+  ]);
+  expect(result.value.objects[0]?.limitations).toContain(
+    "AMDGPU notes declare conflicting processor targets; processor identity is unknown",
+  );
+  expect(result.value.coverage).toMatchObject({
+    discovery: "partial",
+    payloads: "partial",
+  });
+  expect(result.value.kernels).toMatchObject([
+    { name: "add_one", parameter_bytes: 12, registers: { sgpr: 6, vgpr: 2 } },
+    { name: "add_one", parameter_bytes: 12, registers: { sgpr: 6, vgpr: 2 } },
+  ]);
+  expect(new Set(result.value.kernels.map(({ id }) => id)).size).toBe(2);
+  const selected = await inspect(bytes, { targets: ["gfx900"] });
+  if (!selected.ok) throw selected.error;
+  expect(selected.value.objects[0]).toMatchObject({
+    target: null,
+    payload_target: null,
+    target_consistency: "unknown",
+    inspection: "not-selected",
+  });
+  expect(selected.value.kernels).toEqual([]);
+});
+it.each(
+  [
+    "amdgcn-amd-amdhsa-unknown-",
+    "amdgpu9.00-amd-amdhsa--",
+    "amdgpu9.00-amd-amdhsa-unknown-",
+  ].flatMap((prefix) =>
+    (
+      [
+        ["gfx900", "gfx900", "consistent"],
+        ["gfx1100", "gfx900", "conflict"],
+        ["gfx900", "gfx900:xnack+", "unknown"],
+        ["gfx900", "gfx900+xnack", "unknown"],
+        ["gfx900+xnack", "gfx900", "unknown"],
+        ["GFX900", "gfx900", "unknown"],
+        ["gfx900", "GFX900", "unknown"],
+      ] as const
+    ).map(([inventoryTarget, payloadTargetId, consistency]) => ({
+      inventoryTarget,
+      payloadTarget: `${prefix}${payloadTargetId}`,
+      consistency,
+    })),
+  ),
+)(
+  "compares AMDGPU inventory $inventoryTarget with note $payloadTarget as $consistency",
+  async ({ inventoryTarget, payloadTarget, consistency }) => {
+    const bytes = hipFixture(
+      amdFixture(false, undefined, payloadTarget),
+      `hipv4-amdgcn-amd-amdhsa--${inventoryTarget}`,
+    );
+    const result = await inspect(bytes, { targets: [inventoryTarget] });
+    if (!result.ok) throw result.error;
+    const row = result.value.objects.find((value) => value.kind === "amdgpu")!;
+    expect(row.payload_target).toBe(payloadTarget);
+    expect(result.value.kernels).toHaveLength(1);
+    if (consistency === "conflict") {
+      expect(row).toMatchObject({
+        target: inventoryTarget,
+        target_consistency: "conflict",
+        inspection: "partial",
+      });
+      expect(result.value.coverage.payloads).toBe("partial");
+      expect(result.value.kernels[0]!.limitations.join(" ")).toContain(
+        "Conflicting target declarations",
       );
-      const result = await inspect(bytes);
-      if (!result.ok) throw result.error;
-      const row = result.value.objects.find(
-        (value) => value.kind === "amdgpu",
-      )!;
-      expect(row.payload_target).toBe(payloadTarget);
-      expect(result.value.kernels).toHaveLength(1);
-      if (comparison === "conflict") {
-        expect(row).toMatchObject({
-          target: "gfx1100",
-          target_consistency: "conflict",
-          inspection: "partial",
-        });
-        expect(result.value.coverage.payloads).toBe("partial");
-        expect(result.value.kernels[0]!.limitations.join(" ")).toContain(
-          "Conflicting target declarations",
-        );
-      } else {
-        expect(row).toMatchObject({
-          target: "gfx900",
-          target_consistency: comparison === "match" ? "consistent" : "unknown",
-          inspection: "complete",
-        });
-        expect(result.value.coverage.payloads).toBe("complete");
-        expect(result.value.kernels[0]!.limitations.join(" ")).not.toContain(
-          "Conflicting target declarations",
-        );
-      }
+    } else {
+      expect(row).toMatchObject({
+        target: inventoryTarget,
+        target_consistency: consistency,
+        inspection: "complete",
+      });
+      expect(result.value.coverage.payloads).toBe("complete");
+      expect(result.value.kernels[0]!.limitations.join(" ")).not.toContain(
+        "Conflicting target declarations",
+      );
     }
   },
 );
@@ -779,9 +860,18 @@ it.each(["truncated", "invalid", "extension"] as const)(
       tail.write("AMDGPU\0", 12);
       tail[20] = kind === "invalid" ? 0xc1 : 0xd4;
     }
-    for (const bytes of [
-      amdFixture(false, tail),
-      hipFixture(amdFixture(false, tail)),
+    const payloadTarget = "amdgcn-amd-amdhsa--gfx900";
+    for (const { bytes, target, consistency } of [
+      {
+        bytes: amdFixture(false, tail),
+        target: payloadTarget,
+        consistency: "single-source",
+      },
+      {
+        bytes: hipFixture(amdFixture(false, tail)),
+        target: "gfx900",
+        consistency: "consistent",
+      },
     ]) {
       const result = await inspect(bytes);
       if (!result.ok) throw result.error;
@@ -794,7 +884,42 @@ it.each(["truncated", "invalid", "extension"] as const)(
       expect(
         result.value.objects.find((row) => row.kind === "amdgpu")!.inspection,
       ).toBe(kind === "extension" ? "unsupported" : "malformed");
+      const identity = {
+        target,
+        payload_target: payloadTarget,
+        target_consistency: consistency,
+      };
+      expect(
+        result.value.objects.find((row) => row.kind === "amdgpu"),
+      ).toMatchObject(identity);
       expect(result.value.coverage.payloads).toBe("partial");
+      const selected = await inspect(bytes, { targets: [target] });
+      if (!selected.ok) throw selected.error;
+      expect(
+        selected.value.objects.find((row) => row.kind === "amdgpu"),
+      ).toMatchObject(identity);
+      expect(selected.value.kernels).toEqual(result.value.kernels);
+      expect(selected.value.coverage.payloads).toBe("partial");
+      const skipped = await inspect(bytes, {
+        targets: [target === "gfx900" ? payloadTarget : "gfx900"],
+      });
+      if (!skipped.ok) throw skipped.error;
+      expect(
+        skipped.value.objects.find((row) => row.kind === "amdgpu"),
+      ).toMatchObject(
+        target === payloadTarget
+          ? {
+              ...identity,
+              inspection: kind === "extension" ? "unsupported" : "malformed",
+            }
+          : {
+              target,
+              payload_target: null,
+              target_consistency: "unexamined",
+              inspection: "not-selected",
+            },
+      );
+      expect(skipped.value.kernels).toEqual([]);
     }
   },
 );

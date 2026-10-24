@@ -136,6 +136,7 @@ it("inspects a capture with endpoints, DNS, TLS SNI, and HTTP", async () => {
   expect(result.capture_start).toBe("2026-10-11T14:13:40.608505Z");
   expect(result.capture_end).toBe("2026-10-11T14:13:40.981978Z");
   expect(result.packet_count).toBe(3);
+  expect(result.snapshot_length).toBe(262144);
   expect(result.endpoints).toEqual(
     expect.arrayContaining([
       { address: "192.168.1.100", port: null, packet_count: 3 },
@@ -726,3 +727,15 @@ it.each([false, true])(
     ).rejects.toMatchObject({ code: "ENOENT" });
   },
 );
+
+it("requests HTTP/2 URI facts and projects them through capture inspection", async () => {
+  const { provider, root } = await providerWith({ http2Uri: true });
+  const path = await captureFixture(root);
+  const result = await evidenceResult(provider, {
+    operation: "inspect_pcap_capture",
+    input: { path },
+  });
+  expect(result.http_request_uris).toEqual(["http://example.test/h2"]);
+  expect(result.http_request_uri_count).toBe(1);
+  expect(result.coverage).toBe("complete");
+});

@@ -36,7 +36,6 @@ const verifiedManagedDeclarationSchema = managedNativeImportSchema
     call_convention: true,
   })
   .extend({
-    import_name: z.string().min(1),
     declaration_verification: managedNativeImportSchema.shape.verification,
   })
   .strict();
@@ -170,6 +169,7 @@ export const managedNativeVerificationResultSchema = z
     }),
     pinvoke_imports: z.array(pinvokeVerificationSchema),
     native_implementations: z.strictObject({
+      runtime_provided: z.int().nonnegative().nullable().default(null),
       unresolved: z.int().min(0),
       reason: textSchema,
     }),

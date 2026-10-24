@@ -72,6 +72,84 @@ it("reads PE32 and PE32+ PKCS#7 certificate tables", () => {
   }
 });
 
+it("accepts only zero eight-byte alignment padding included in dwLength", () => {
+  for (const plus of [false, true]) {
+    const bytes = peCertificateFixture(plus, undefined, undefined, true);
+    const originalDigest = createHash("sha256").update(bytes).digest("hex");
+    const encodedPayload = pkcs7SignedDataFixture();
+    const report = parse(bytes);
+    expect(report.artifact.sha256).toBe(originalDigest);
+    expect(report.artifact.bytes).toBe(bytes.length);
+    expect(report.format).toBe(plus ? "pe32-plus" : "pe32");
+    expect(report.entries[0]).toMatchObject({
+      location: { offset: 0x200, bytes: bytes.readUInt32LE(0x200) },
+      length: bytes.readUInt32LE(0x200),
+      payload: {
+        location: { offset: 0x208, bytes: encodedPayload.length },
+        bytes: encodedPayload.length,
+        sha256: createHash("sha256").update(encodedPayload).digest("hex"),
+      },
+    });
+    expect(report.coverage).toEqual({
+      status: "complete",
+      examined_entries: 1,
+      certificates: 1,
+    });
+    expect(report.entries[0]?.pkcs7?.certificates).toHaveLength(1);
+    expect(report.entries[0]?.pkcs7?.signers).toHaveLength(1);
+  }
+});
+
+it.each([false, true])(
+  "reads all counted alignment gaps and consecutive entries (PE32+ = %s)",
+  (plus) => {
+    const gaps = new Set<number>();
+    for (let size = 1; size <= 32; size += 1) {
+      const payload = pkcs7SignedDataFixture("x".repeat(size));
+      const gap = (8 - ((8 + payload.length) % 8)) % 8;
+      if (gaps.has(gap)) continue;
+      gaps.add(gap);
+      const single = peCertificateFixture(plus, payload, 2, true);
+      const table = single.subarray(0x200);
+      const bytes = Buffer.concat([single, table]);
+      const directoryAt = 0x98 + (plus ? 112 : 96) + 4 * 8;
+      bytes.writeUInt32LE(table.length * 2, directoryAt + 4);
+      const report = peCertificatesSchema.parse(parse(bytes));
+      expect(report.coverage).toEqual({
+        status: "complete",
+        examined_entries: 2,
+        certificates: 2,
+      });
+      for (const [index, entry] of report.entries.entries()) {
+        expect(entry.location).toEqual({
+          offset: 0x200 + index * table.length,
+          bytes: table.length,
+        });
+        expect(entry.payload.bytes).toBe(payload.length);
+        expect(entry.payload.sha256).toBe(
+          createHash("sha256").update(payload).digest("hex"),
+        );
+        expect(entry.pkcs7?.signers).toHaveLength(1);
+      }
+    }
+    expect([...gaps].sort()).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+  },
+);
+
+it("rejects nonzero or excessive bytes after the encoded PKCS#7 value", () => {
+  const payload = pkcs7SignedDataFixture();
+  const nonzero = peCertificateFixture(false, payload, 2, true);
+  nonzero[0x200 + 8 + payload.length] = 1;
+  expect(() => parse(nonzero)).toThrow(/invalid PKCS#7 alignment padding/u);
+
+  const extra = peCertificateFixture(
+    false,
+    Buffer.concat([payload, Buffer.alloc(8)]),
+    2,
+  );
+  expect(() => parse(extra)).toThrow(/invalid PKCS#7 alignment padding/u);
+});
+
 it("reads BER indefinite constructed ContentInfo and preserves certificate bytes", () => {
   const payload = pkcs7SignedDataIndefiniteEnvelopeFixture();
   const root = readAsn1(payload);
@@ -179,14 +257,22 @@ it("reports an absent security directory without claiming the image is unsigned"
   );
 });
 
+const securityDirectoryAt = 0x98 + 96 + 4 * 8;
+
 it("fails truncated WIN_CERTIFICATE payloads without partial success", () => {
   const bytes = peCertificateFixture();
   const tableOffset = bytes.readUInt32LE(0x80 + 24 + 96 + 32);
   bytes.writeUInt32LE(4, tableOffset);
   expect(() => parse(bytes)).toThrow(ArtifactReaderFailure);
-});
 
-const securityDirectoryAt = 0x98 + 96 + 4 * 8;
+  const overlong = peCertificateFixture();
+  const overlongTableOffset = overlong.readUInt32LE(securityDirectoryAt);
+  const tableSize = overlong.readUInt32LE(securityDirectoryAt + 4);
+  overlong.writeUInt32LE(tableSize + 1, overlongTableOffset);
+  expect(() => parse(overlong)).toThrow(
+    /dwLength exceeds the certificate table/u,
+  );
+});
 
 it("rejects a short security table instead of reporting it complete", () => {
   for (const size of [4, 7]) {

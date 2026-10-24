@@ -13,7 +13,7 @@ export const NATIVE_AOT_MAX_WORK_UNITS = 64 * 1024 * 1024;
 export const NATIVE_AOT_MAX_WORKING_MEMORY_BYTES = 64 * 1024 * 1024;
 /** Version of the built-in read-only PE metadata interpretation in profiles. */
 export const NATIVE_AOT_PROFILE_CONTRACT_REVISION =
-  "rtr-9.1-x64-pe-read-only-v5";
+  "rtr-9.1-x64-pe-read-only-v7";
 
 export type NativeAotParserLimits = {
   readonly sourceBytes: number;
@@ -70,6 +70,19 @@ class NativeAotParserBudget {
 
   releaseWorkingMemory(bytes: number): void {
     this.workingMemoryBytes = Math.max(0, this.workingMemoryBytes - bytes);
+  }
+}
+
+/** Source-byte identity mismatch retained for adapter-specific recovery. */
+export class NativeAotSnapshotIdentityError extends Error {
+  constructor(
+    readonly expectedSha256: string,
+    readonly observedSha256: string,
+  ) {
+    super(
+      `NativeAOT snapshot digest does not match the admitted artifact identity: expected ${expectedSha256}, observed ${observedSha256}`,
+    );
+    this.name = "NativeAotSnapshotIdentityError";
   }
 }
 
@@ -186,6 +199,68 @@ class MethodTableIndex {
     if (!this.isIncluded(index)) {
       this.#records.writeUInt8(1, index * METHOD_TABLE_RECORD_BYTES + 28);
       this.#includedCount++;
+    }
+  }
+
+  /** Index validated related pointers once, then visit every reachable table once. */
+  includeReachable(root: number, image: PeImage): boolean {
+    const storageBytes = this.#count * 3 * Int32Array.BYTES_PER_ELEMENT;
+    if (!this.budget.reserveWorkingMemory(storageBytes)) return false;
+    try {
+      if (!this.budget.consumeWork(this.#count * 8)) return false;
+      const storage = new Int32Array(this.#count * 3);
+      const children = storage.subarray(0, this.#count).fill(-1);
+      const next = storage.subarray(this.#count, this.#count * 2).fill(-1);
+      const queue = storage.subarray(this.#count * 2);
+      for (let index = 0; index < this.#count; index += 1) {
+        const related = this.#records.readBigUInt64LE(
+          index * METHOD_TABLE_RECORD_BYTES + 16,
+        );
+        if (related === 0n) continue;
+        const parent = this.find(related, this.budget);
+        if (this.budget.truncationReason !== undefined) return false;
+        if (parent >= 0) {
+          next[index] = children[parent] ?? -1;
+          children[parent] = index;
+        }
+      }
+      let read = 0;
+      let write = 0;
+      const include = (index: number) => {
+        if (this.isIncluded(index)) return;
+        this.include(index);
+        queue[write++] = index;
+      };
+      include(root);
+      while (read < write) {
+        const baseIndex = queue[read++] ?? -1;
+        const base = this.at(baseIndex);
+        if (base === undefined) continue;
+        for (
+          let child = children[baseIndex] ?? -1;
+          child >= 0;
+          child = next[child] ?? -1
+        ) {
+          if (!this.budget.consumeWork(8)) return false;
+          include(child);
+        }
+        for (let index = 0; index < base.interfacesCount; index += 1) {
+          if (!this.budget.consumeWork(8)) return false;
+          const address = readU64(
+            image.read(
+              base.address + 24n + BigInt((base.slotsCount + index) * 8),
+              8,
+            ),
+          );
+          if (address === null) continue;
+          const interfaceIndex = this.find(address, this.budget);
+          if (this.budget.truncationReason !== undefined) return false;
+          if (interfaceIndex >= 0) include(interfaceIndex);
+        }
+      }
+      return true;
+    } finally {
+      this.budget.releaseWorkingMemory(storageBytes);
     }
   }
 
@@ -655,20 +730,25 @@ const findDirectory = (
   let found: RtrDirectory | null = null;
   let matches = 0;
   let scanBytesExamined = 0;
-  let totalScanBytes = 0;
-  let truncated = false;
-  scan: for (const section of image.sections) {
+  const ranges = image.sections.flatMap((section) => {
     if (
       (section.characteristics & 0x40000000) === 0 ||
       (section.characteristics & 0x20000000) !== 0
     )
-      continue;
+      return [];
     const begin = section.rawOffset;
     const end = begin + fileBackedVirtualExtent(section);
     const first = (begin + 7) & ~7;
     const candidateBytes =
       first <= end - 16 ? (Math.floor((end - 16 - first) / 8) + 1) * 8 : 0;
-    totalScanBytes += candidateBytes;
+    return [{ section, begin, end, first, candidateBytes }];
+  });
+  const totalScanBytes = ranges.reduce(
+    (total, range) => total + range.candidateBytes,
+    0,
+  );
+  let truncated = false;
+  scan: for (const { section, begin, end, first } of ranges) {
     for (let offset = first; offset <= end - 16; offset += 8) {
       if (!budget.consumeWork(8)) {
         truncated = true;
@@ -752,31 +832,40 @@ const findDirectory = (
   };
 };
 
+/** One discovery owner counts only entries the validator actually examines. */
 const parseMethodTable = (
   image: PeImage,
   address: bigint,
-  remainingValidationItems: number,
+  budget: NativeAotParserBudget,
+  validation: { itemsExamined: number },
 ): MethodTable | null => {
-  const header = image.read(address, 16);
+  const header = image.read(address, 24);
   if (header === null) return null;
   const flags = header.readUInt32LE(0),
     baseSize = header.readUInt32LE(4),
     related = header.readBigUInt64LE(8);
-  const counts = image.read(address + 16n, 4);
-  if (counts === null) return null;
-  const slotsCount = counts.readUInt16LE(0),
-    interfacesCount = counts.readUInt16LE(2);
-  if (baseSize > 0x10000000 || (baseSize !== 0 && baseSize < 16)) return null;
-  const itemCount = slotsCount + interfacesCount;
-  if (itemCount > remainingValidationItems) return null;
-  const tableBytes = 24 + itemCount * 8;
+  const elementType = (flags & 0x7c000000) >>> 26;
+  if (
+    (elementType !== 0x14 && elementType !== 0x15) ||
+    baseSize < 16 ||
+    baseSize > 0x10000000 ||
+    (related !== 0n && image.read(related, 24) === null)
+  )
+    return null;
+  const slotsCount = header.readUInt16LE(16),
+    interfacesCount = header.readUInt16LE(18);
+  const tableBytes = 24 + (slotsCount + interfacesCount) * 8;
   const table = image.read(address, tableBytes);
   if (table === null) return null;
   for (let slot = 0; slot < slotsCount; slot++) {
+    if (!budget.consumeWork(8)) return null;
+    validation.itemsExamined++;
     const target = table.readBigUInt64LE(24 + slot * 8);
     if (target !== 0n && !image.isExecutable(target)) return null;
   }
   for (let index = 0; index < interfacesCount; index++) {
+    if (!budget.consumeWork(8)) return null;
+    validation.itemsExamined++;
     const iface = table.readBigUInt64LE(24 + (slotsCount + index) * 8);
     if (iface !== 0n && image.read(iface, 20) === null) return null;
   }
@@ -1017,7 +1106,6 @@ const discoverTables = (
   scanBytesExamined: number;
   scanBytesOmitted: number;
   methodTableValidationItemsExamined: number;
-  workBytesExamined: number;
   truncated: boolean;
 } => {
   const ranges: { start: bigint; end: bigint }[] = [];
@@ -1067,9 +1155,8 @@ const discoverTables = (
   let pointerCount = 0,
     pointerSlotsExamined = 0,
     scanBytesExamined = 0,
-    validationItems = 0,
-    workBytesExamined = 0,
     truncated = false;
+  const validation = { itemsExamined: 0 };
   const candidates = new MethodTableIndex(budget);
   scan: for (const range of merged) {
     let address = (range.start + 7n) & ~7n;
@@ -1079,48 +1166,27 @@ const discoverTables = (
         break scan;
       }
       const value = readU64(image.read(address, 8));
+      if (budget.truncationReason !== undefined) {
+        truncated = true;
+        break scan;
+      }
       pointerSlotsExamined++;
       scanBytesExamined += 8;
-      workBytesExamined += 8;
       if (value !== null && value !== 0n) pointerCount++;
       const candidateAddress = address - 8n;
-      const header =
-        candidateAddress >= image.imageBase
-          ? image.read(candidateAddress, 24)
-          : null;
-      if (header !== null) {
-        const flags = header.readUInt32LE(0);
-        const elementType = (flags & 0x7c000000) >>> 26;
-        const baseSize = header.readUInt32LE(4);
-        const related = header.readBigUInt64LE(8);
-        const plausibleHeader =
-          (elementType === 0x14 || elementType === 0x15) &&
-          baseSize >= 16 &&
-          baseSize <= 0x10000000 &&
-          (related === 0n || image.read(related, 24) !== null);
-        if (!plausibleHeader) {
-          address += 8n;
-          continue;
-        }
-        const counts = image.read(candidateAddress + 16n, 4);
-        if (counts === null) {
-          address += 8n;
-          continue;
-        }
-        const itemCount = counts.readUInt16LE(0) + counts.readUInt16LE(2);
-        if (!budget.consumeWork(itemCount * 8)) {
-          truncated = true;
-          break scan;
-        }
-        validationItems += itemCount;
-        workBytesExamined += itemCount * 8;
-        const candidate = parseMethodTable(image, candidateAddress, itemCount);
-        if (candidate !== null) {
-          if (!candidates.append(candidate)) {
-            truncated = true;
-            break scan;
-          }
-        }
+      const candidate = parseMethodTable(
+        image,
+        candidateAddress,
+        budget,
+        validation,
+      );
+      if (budget.truncationReason !== undefined) {
+        truncated = true;
+        break scan;
+      }
+      if (candidate !== null && !candidates.append(candidate)) {
+        truncated = true;
+        break scan;
       }
       address += 8n;
     }
@@ -1152,6 +1218,7 @@ const discoverTables = (
       objectCount++;
     }
   });
+  truncated ||= budget.truncationReason !== undefined;
   if (objectCount !== 1 || objectRoot < 0 || truncated)
     return {
       tables: candidates,
@@ -1159,67 +1226,17 @@ const discoverTables = (
       pointerSlotsExamined,
       scanBytesExamined,
       scanBytesOmitted: Math.max(0, totalScanBytes - scanBytesExamined),
-      methodTableValidationItemsExamined: validationItems,
-      workBytesExamined,
+      methodTableValidationItemsExamined: validation.itemsExamined,
       truncated,
     };
-  candidates.include(objectRoot);
-  let changed = true;
-  while (changed && !truncated) {
-    changed = false;
-    candidates.forEach((base, baseIndex) => {
-      if (truncated || !candidates.isIncluded(baseIndex)) return;
-      for (
-        let candidateIndex = 0;
-        candidateIndex < candidates.count;
-        candidateIndex++
-      ) {
-        if (!budget.consumeWork(8)) {
-          truncated = true;
-          return;
-        }
-        const candidate = candidates.at(candidateIndex);
-        if (
-          candidate !== undefined &&
-          candidate.related === base.address &&
-          !candidates.isIncluded(candidateIndex)
-        ) {
-          candidates.include(candidateIndex);
-          changed = true;
-        }
-      }
-      for (let index = 0; index < base.interfacesCount; index++) {
-        if (!budget.consumeWork(8)) {
-          truncated = true;
-          return;
-        }
-        const ifaceAddress = readU64(
-          image.read(
-            base.address + 24n + BigInt((base.slotsCount + index) * 8),
-            8,
-          ),
-        );
-        if (ifaceAddress === null) continue;
-        const interfaceIndex = candidates.find(ifaceAddress, budget);
-        if (budget.truncationReason !== undefined) {
-          truncated = true;
-          return;
-        }
-        if (interfaceIndex >= 0 && !candidates.isIncluded(interfaceIndex)) {
-          candidates.include(interfaceIndex);
-          changed = true;
-        }
-      }
-    });
-  }
+  truncated = !candidates.includeReachable(objectRoot, image);
   return {
     tables: candidates,
     pointerCount,
     pointerSlotsExamined,
     scanBytesExamined,
     scanBytesOmitted: Math.max(0, totalScanBytes - scanBytesExamined),
-    methodTableValidationItemsExamined: validationItems,
-    workBytesExamined,
+    methodTableValidationItemsExamined: validation.itemsExamined,
     truncated,
   };
 };
@@ -1253,9 +1270,7 @@ export const parseNativeAotPe = (
     );
   const sha256 = createHash("sha256").update(bytes).digest("hex");
   if (sha256 !== expectedSha256)
-    throw new Error(
-      "NativeAOT snapshot digest does not match the admitted artifact identity",
-    );
+    throw new NativeAotSnapshotIdentityError(expectedSha256, sha256);
   let image: PeImage;
   try {
     image = new PeImage(bytes);

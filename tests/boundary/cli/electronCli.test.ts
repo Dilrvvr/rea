@@ -1,3 +1,4 @@
+import { parseEvidence } from "../../../src/domain/evidence.js";
 import { execFile, spawn } from "node:child_process";
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -43,7 +44,7 @@ it(
     await writeFile(join(root, "index.html"), "<script src='app.js'></script>");
     await writeFile(join(root, "app.js"), "export const app = true;");
     const browser = await startFakeCdpBrowser({
-      electronFileUrl: pathToFileURL(join(root, "index.html")).href,
+      electronFileUrl: `${pathToFileURL(join(root, "index.html")).href}?next=%2Fsettings#%5Csettings`,
       commandEvents: ({ method }) =>
         method === "Debugger.enable"
           ? [
@@ -61,12 +62,23 @@ it(
     });
     browsers.push(browser);
     const environment = { ...process.env };
-    const listed = await runCli(
-      ["list-electron-targets", browser.endpoint, "--json"],
-      environment,
+    const listed = parseEvidence(
+      await runCli(
+        ["list-electron-targets", browser.endpoint, "--json"],
+        environment,
+      ),
     );
     expect(listed).toMatchObject({
       operation: "list_electron_targets",
+      environment: {
+        id: expect.any(String),
+        platform: "unknown",
+        architecture: "unknown",
+        isolation: "none",
+      },
+      limitations: expect.arrayContaining([
+        "Browser host platform and architecture were not observed.",
+      ]),
       normalized_result: {
         targets: [{ target_id: "electron-page" }],
       },
@@ -84,6 +96,7 @@ it(
     );
     expect(inspected).toMatchObject({
       operation: "inspect_electron_page",
+      environment: listed.environment,
       provider: { id: "rea-cdp-electron" },
       normalized_result: {
         target: { file_path: join(root, "index.html") },

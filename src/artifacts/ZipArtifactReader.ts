@@ -297,6 +297,7 @@ const projectZipEntry = (
   if (kind === "directory" && (path === "" || path === ".")) return undefined;
   return {
     path,
+    ...(path === sourcePath ? {} : { sourcePath }),
     kind,
     declaredSize: kind === "directory" ? null : entry.uncompressedSize,
     compressedSize: kind === "directory" ? null : entry.compressedSize,
@@ -386,7 +387,9 @@ const extractStream = (entry: FileEntry, signal?: AbortSignal): Readable => {
     // against `getData` rejecting with its own AbortError. That ordering is what
     // keeps the caller-visible failure typed as `cancelled`.
     output.destroy(
-      new ArtifactReaderFailure("cancelled", "ZIP operation cancelled"),
+      new ArtifactReaderFailure("cancelled", "ZIP operation cancelled", {
+        cause: signal?.reason,
+      }),
     );
   };
   signal?.addEventListener("abort", onAbort, { once: true });

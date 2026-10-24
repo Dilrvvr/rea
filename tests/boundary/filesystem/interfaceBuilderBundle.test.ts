@@ -1,3 +1,4 @@
+import { binaryKeyedArchiveUidShapes } from "../../fixtures/keyedArchiveUidShapes.js";
 import { execFile } from "node:child_process";
 import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -764,10 +765,10 @@ describe("bounded Interface Builder archive decoding", () => {
             : [
                 {
                   classIndex: 2,
-                  values: {
-                    first: { ref: viewId + 2 },
-                    second: { ref: viewId + 2 },
-                  },
+                  values: [
+                    ["NS.objects", { ref: viewId + 2 }],
+                    ["NS.objects", { ref: viewId + 2 }],
+                  ] as const,
                 },
               ]),
         ];
@@ -1390,7 +1391,7 @@ describe("aggregate Interface Builder archive retention budget", () => {
     await mkdir(resources, { recursive: true });
     const padding = `<!--${"x".repeat(1024)}-->`.repeat(11 * 1024);
     const valid = (name: string, body = "") =>
-      `<?xml version="1.0"?><plist version="1.0"><dict><key>document</key><string>${name}</string>${body}</dict></plist>`;
+      `<?xml version="1.0"?><plist version="1.0"><dict><key>com.apple.ibtool.document.objects</key><dict><key>view</key><dict><key>class</key><string>NSView</string><key>document</key><string>${name}</string>${body}</dict></dict></dict></plist>`;
     // XML data expands to a Uint8Array and then to a base64 JSON projection;
     // this first valid document exercises expansion beyond the source bytes.
     const expandedData = Buffer.alloc(1024 * 1024, 7).toString("base64");
@@ -1433,12 +1434,12 @@ describe("Interface Builder XML plist depth", () => {
     const bundle = join(root, "Example.app");
     const resources = join(bundle, "Contents", "Resources");
     await mkdir(resources, { recursive: true });
-    // The root dict is value depth 0, so the leaf sits at `nested + 1`. The
-    // plist envelope and keys add XML elements but not value depth.
+    // Root, object table and object occupy depths 0, 1 and 2. The leaf
+    // sits at nested + 3; plist envelopes and keys add no value depth.
     const document = (nested: number) =>
-      `<?xml version="1.0"?><plist version="1.0"><dict>${"<key>child</key><dict>".repeat(nested)}<key>leaf</key><integer>1</integer>${"</dict>".repeat(nested)}</dict></plist>`;
-    await writeFile(join(resources, "AtLimit.nib"), document(127));
-    await writeFile(join(resources, "BeyondLimit.nib"), document(128));
+      `<?xml version="1.0"?><plist version="1.0"><dict><key>com.apple.ibtool.document.objects</key><dict><key>view</key><dict><key>class</key><string>NSView</string>${"<key>child</key><dict>".repeat(nested)}<key>leaf</key><integer>1</integer>${"</dict>".repeat(nested)}</dict></dict></dict></plist>`;
+    await writeFile(join(resources, "AtLimit.nib"), document(125));
+    await writeFile(join(resources, "BeyondLimit.nib"), document(126));
 
     const release = vi.spyOn(InterfaceBuilderDecodeBudget.prototype, "release");
     const result = await analyzeInterfaceBuilderBundle({
@@ -2130,3 +2131,248 @@ describe.skipIf(process.platform !== "darwin")(
     );
   },
 );
+
+it("reports a plain plist named nib as undecoded while retaining a valid empty archive", async () => {
+  const bundle = await createTestTempDirectory("rea-ib-archive-recognition-");
+  await writeFile(
+    join(bundle, "Plain.nib"),
+    buildBinary({ CFBundleIdentifier: "sample" }),
+  );
+  await writeFile(
+    join(bundle, "Empty.nib"),
+    buildBinary({ "com.apple.ibtool.document.objects": {} }),
+  );
+  const result = await analyzeInterfaceBuilderBundle({
+    bundlePath: bundle,
+    targetSha256: "a".repeat(64),
+  });
+  expect(result.documents.map(({ relative_path }) => relative_path)).toEqual([
+    "Empty.nib",
+  ]);
+  expect(
+    result.graph.coverage.find(({ facet }) => facet === "archive_decode"),
+  ).toMatchObject({
+    status: "partial",
+    examined: 2,
+    reason: "one_or_more_archives_invalid",
+  });
+});
+
+it("preserves authored binary UID-shaped dictionaries through UI archive decoding", async () => {
+  const bundle = await createTestTempDirectory("rea-ui-uid-shapes-");
+  await writeFile(join(bundle, "Main.nib"), binaryKeyedArchiveUidShapes());
+  const result = await analyzeInterfaceBuilderBundle({
+    bundlePath: bundle,
+    targetSha256: "a".repeat(64),
+  });
+  const source = result.graph.nodes.find(
+    (node) => node.attributes.ordinary !== undefined,
+  );
+  expect(source).toBeDefined();
+  expect(source?.attributes).toMatchObject({
+    ordinary: { UID: 2 },
+    xmlConvention: { CF$UID: 2 },
+    actual: { archiveUID: 2, className: "NSView" },
+  });
+});
+
+it.each(["embedded", "segue", "neither"] as const)(
+  "reports recognized unexamined nib source coverage: %s",
+  async (source) => {
+    const bundle = await createTestTempDirectory("rea-ui-unexamined-sources-");
+    await writeFile(
+      join(bundle, "Main.nib"),
+      encodeNibArchiveFixture({
+        classes: ["UINib", "UIStoryboardShowSegueTemplate", "NSView"],
+        objects: [
+          { classIndex: 2, values: {} },
+          ...(source === "embedded"
+            ? [{ classIndex: 0, values: { "UINib.archiveData": { ref: 0 } } }]
+            : []),
+          ...(source === "segue" ? [{ classIndex: 1, values: {} }] : []),
+        ],
+      }),
+    );
+    const result = await analyzeInterfaceBuilderBundle({
+      bundlePath: bundle,
+      targetSha256: "a".repeat(64),
+    });
+    for (const kind of ["objects", "classes"])
+      expect(
+        result.graph.coverage.find(({ facet }) => facet === `${kind}:Main.nib`)
+          ?.status,
+      ).toBe(source === "embedded" ? "partial" : "complete");
+    expect(
+      result.graph.coverage.find(
+        ({ facet }) => facet === "connections:Main.nib",
+      )?.status,
+    ).toBe(source === "neither" ? "complete" : "partial");
+    expect(
+      result.graph.coverage.find(({ facet }) => facet === "archive_decode")
+        ?.status,
+    ).toBe(source === "neither" ? "complete" : "partial");
+    if (source !== "neither") {
+      expect(result.graph.truncated).toBe(true);
+      expect(result.limitations).toContainEqual(
+        expect.stringContaining(
+          source === "embedded"
+            ? "embedded archive data"
+            : "segue template object",
+        ),
+      );
+    }
+  },
+);
+
+it.each([1, 2])(
+  "projects every serialized outlet collection member in source order: %i",
+  async (count) => {
+    const bundle = await createTestTempDirectory("rea-ui-outlet-collection-");
+    await writeFile(
+      join(bundle, "Main.nib"),
+      encodeNibArchiveFixture({
+        classes: [
+          "UIViewController",
+          "UIButton",
+          "UIRuntimeOutletCollectionConnection",
+          "NSMutableArray",
+          "NSString",
+        ],
+        objects: [
+          { classIndex: 0, values: {} },
+          { classIndex: 1, values: {} },
+          { classIndex: 1, values: {} },
+          {
+            classIndex: 2,
+            values: {
+              UISource: { ref: 0 },
+              UIDestination: { ref: 4 },
+              UILabel: { ref: 5 },
+            },
+          },
+          {
+            classIndex: 3,
+            values: [
+              ["UINibEncoderEmptyKey", { ref: 2 }],
+              ...(count === 2
+                ? ([["UINibEncoderEmptyKey", { ref: 1 }]] as const)
+                : []),
+            ],
+          },
+          { classIndex: 4, values: { "NS.bytes": "buttons" } },
+        ],
+      }),
+    );
+    const result = await analyzeInterfaceBuilderBundle({
+      bundlePath: bundle,
+      targetSha256: "a".repeat(64),
+    });
+    const edges = result.graph.edges.filter(
+      ({ relation }) => relation === "outlet_to",
+    );
+    expect(edges).toHaveLength(count);
+    expect(
+      edges.every(
+        ({ resolution, limitations }) =>
+          resolution === "observed" && limitations.length === 0,
+      ),
+    ).toBe(true);
+    const outlets = result.graph.nodes.filter(({ kind }) => kind === "outlet");
+    expect(
+      outlets.map(({ attributes }) => [
+        attributes.archive_collection_id,
+        attributes.archive_collection_member_index,
+      ]),
+    ).toEqual(Array.from({ length: count }, (_, index) => [4, index]));
+    expect(
+      edges.map(
+        ({ to }) =>
+          result.graph.nodes.find(({ id }) => id === to)?.attributes
+            .interface_builder_object_id,
+      ),
+    ).toEqual(count === 2 ? ["2", "1"] : ["2"]);
+  },
+);
+
+it("uses paired AppKit registry parents without promoting nested objects to roots", async () => {
+  const bundle = await createTestTempDirectory("rea-ui-parent-registry-");
+  await writeFile(
+    join(bundle, "Main.nib"),
+    encodeNibArchiveFixture({
+      classes: [
+        "NSIBObjectData",
+        "NSCustomObject",
+        "NSView",
+        "NSArray",
+        "NSString",
+      ],
+      objects: [
+        {
+          classIndex: 0,
+          values: {
+            NSRoot: { ref: 1 },
+            NSObjectsKeys: { ref: 6 },
+            NSObjectsValues: { ref: 7 },
+          },
+        },
+        { classIndex: 1, values: {} },
+        { classIndex: 1, values: { NSClassName: { ref: 8 } } },
+        { classIndex: 1, values: { NSClassName: { ref: 9 } } },
+        { classIndex: 2, values: {} },
+        { classIndex: 2, values: { NSSuperview: { ref: 4 } } },
+        {
+          classIndex: 3,
+          values: [
+            ["UINibEncoderEmptyKey", { ref: 2 }],
+            ["UINibEncoderEmptyKey", { ref: 3 }],
+            ["UINibEncoderEmptyKey", { ref: 4 }],
+            ["UINibEncoderEmptyKey", { ref: 5 }],
+          ],
+        },
+        {
+          classIndex: 3,
+          values: [
+            ["UINibEncoderEmptyKey", { ref: 1 }],
+            ["UINibEncoderEmptyKey", { ref: 1 }],
+            ["UINibEncoderEmptyKey", { ref: 1 }],
+            ["UINibEncoderEmptyKey", { ref: 4 }],
+          ],
+        },
+        { classIndex: 4, values: { "NS.bytes": "NSApplication" } },
+        { classIndex: 4, values: { "NS.bytes": "VerifierHelper" } },
+      ],
+    }),
+  );
+  const result = await analyzeInterfaceBuilderBundle({
+    bundlePath: bundle,
+    targetSha256: "a".repeat(64),
+  });
+  const nodes = result.graph.nodes;
+  const nodeId = (object: string) =>
+    nodes.find(
+      ({ attributes }) => attributes.interface_builder_object_id === object,
+    )?.id;
+  for (const object of ["2", "3", "4"])
+    expect(result.graph.edges).toContainEqual(
+      expect.objectContaining({
+        relation: "contains",
+        from: expect.stringMatching(/:root$/u),
+        to: nodeId(object),
+      }),
+    );
+  expect(result.graph.edges).toContainEqual(
+    expect.objectContaining({
+      relation: "contains",
+      from: nodeId("4"),
+      to: nodeId("5"),
+    }),
+  );
+  expect(result.graph.edges).not.toContainEqual(
+    expect.objectContaining({
+      relation: "contains",
+      from: expect.stringMatching(/:root$/u),
+      to: nodeId("5"),
+    }),
+  );
+  expect(result.documents[0]?.hierarchy_complete).toBe(true);
+});

@@ -2,7 +2,7 @@ import { constants } from "node:buffer";
 import { createHash } from "node:crypto";
 import { Writable } from "node:stream";
 
-import { Cli, Formatter } from "incur";
+import { Cli } from "incur";
 import { estimateTokenCount } from "tokenx";
 import { parse as parseYaml } from "yaml";
 import { describe, expect, it } from "vitest";
@@ -38,6 +38,44 @@ const collect = async (
   await writeJsonOutput(value, destination, format);
   return Buffer.concat(chunks).toString("utf8");
 };
+
+describe("SDK output completion", () => {
+  it.each(["json", "toon"])(
+    "waits for pending raw %s writes before exit",
+    async (format) => {
+      const document = JSON.stringify({
+        code: "VALIDATION_ERROR",
+        message: "x".repeat(8192),
+      });
+      let complete = false;
+      const destination = new Writable({
+        highWaterMark: 1,
+        write(chunk, _encoding, callback) {
+          if (chunk.length === 0) {
+            callback();
+            return;
+          }
+          setImmediate(() => {
+            complete = true;
+            callback();
+          });
+        },
+      });
+      const output = createCliResultOutput(
+        parseCliOutputArguments(["--format", format]),
+        destination,
+      );
+      if (output === undefined)
+        throw new Error("Expected valid output controls");
+      expect(output.captureSdkOutput(document)).toBe(false);
+      destination.write(document);
+      expect(complete).toBe(false);
+      await output.finishSdkOutput(1);
+      expect(complete).toBe(true);
+      expect(destination.writableEnded).toBe(false);
+    },
+  );
+});
 
 describe("incremental CLI JSON", () => {
   it.each([
@@ -473,20 +511,89 @@ describe("full-output token counts", () => {
       destination,
     );
     if (output === undefined) throw new Error("Missing JSON output surface");
-    const cli = Cli.create("rea-output-test", { sync: false });
-    registerManagedCommands(cli, silentLogger, async () => failure);
-    streamCliCommandResults(cli, output);
-    const previousExitCode = process.exitCode;
-    try {
-      await cli.serve(argv, { stdout: () => undefined });
-      expect(process.exitCode).toBe(1);
-    } finally {
-      process.exitCode = previousExitCode;
-    }
+    await output.write(failure, {
+      command: "inspect-managed-artifact",
+      duration: "0ms",
+      format: "json",
+    });
     expect(output.handled).toBe(true);
     expect(Buffer.concat(chunks).toString("utf8")).toBe(
-      `${estimateTokenCount(Formatter.format(failure, "json"))}\n`,
+      `${estimateTokenCount(JSON.stringify({ ok: false, error: failure, meta: { command: "inspect-managed-artifact", duration: "0ms" } }) + "\n")}\n`,
     );
+  });
+  it("counts the exact emitted JSON representation and selected document", async () => {
+    const metadata = { command: "fixture", duration: "0ms", format: "json" };
+    for (const terminal of [false, true]) {
+      for (const flags of [
+        [],
+        ["--full-output"],
+        ["--filter-output", "missing"],
+        ["--format", "jsonl"],
+      ]) {
+        const argv = ["fixture", "--json", ...flags];
+        const render = async (count: boolean) => {
+          const chunks: Buffer[] = [];
+          const destination = new Writable({
+            write(chunk: Buffer, _encoding, callback) {
+              chunks.push(chunk);
+              callback();
+            },
+          });
+          Object.defineProperty(destination, "isTTY", { value: terminal });
+          const output = createCliResultOutput(
+            parseCliOutputArguments([
+              ...argv,
+              ...(count ? ["--token-count"] : []),
+            ]),
+            destination,
+          );
+          if (output === undefined) throw new Error("Missing output surface");
+          await output.write({ value: ["hello", "雪😀"] }, metadata);
+          return Buffer.concat(chunks).toString("utf8");
+        };
+        expect(Number((await render(true)).trim())).toBe(
+          estimateTokenCount(await render(false)),
+        );
+      }
+    }
+  });
+
+  it("normalizes exhausted failure window display coordinates", async () => {
+    const chunks: Buffer[] = [];
+    const destination = new Writable({
+      write(chunk: Buffer, _encoding, callback) {
+        chunks.push(chunk);
+        callback();
+      },
+    });
+    const output = createCliResultOutput(
+      parseCliOutputArguments([
+        "fixture",
+        "--format",
+        "toon",
+        "--full-output",
+        "--token-offset",
+        "100000",
+        "--token-limit",
+        "3",
+      ]),
+      destination,
+    );
+    if (output === undefined) throw new Error("Missing output surface");
+    await output.write(
+      {
+        code: "target_unavailable",
+        category: "unavailable",
+        message: "Missing target",
+        retryable: false,
+        remediation: { action: "Select an available target." },
+      },
+      { command: "fixture", duration: "0ms", format: "toon" },
+    );
+    const text = Buffer.concat(chunks).toString("utf8");
+    expect(text).toMatch(/showing tokens (\d+)–\1 of \1/);
+    expect(text).not.toContain("nextOffset");
+    expect(text).toContain("ok: false");
   });
 });
 
@@ -612,7 +719,8 @@ describe("CLI result output surface", () => {
     });
     expect(exitCode).toBe(1);
     expect(fallbackBytes).toBe(0);
-    expect(JSON.parse(Buffer.concat(chunks).toString("utf8"))).toMatchObject({
+    const report = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    expect(report).toMatchObject({
       ok: false,
       error: {
         code: "resource_constraint",
@@ -621,7 +729,16 @@ describe("CLI result output surface", () => {
         },
         details: {
           reported_limits: {
-            formatted_characters: expectedCharacters - 1,
+            // Token counting uses the compact pipe encoding, unlike the
+            // terminal digest above. Count leaves, separators and framing.
+            formatted_characters:
+              count * encodedLeaf.length +
+              (count - 1) +
+              '{"methods":[]}'.length +
+              1 +
+              JSON.stringify({ ok: true, data: null, meta: report.meta })
+                .length -
+              4,
             max_string_characters: constants.MAX_STRING_LENGTH,
           },
         },

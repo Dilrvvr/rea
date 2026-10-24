@@ -4,6 +4,7 @@ import {
   ArtifactFileCleanupFailure,
   withArtifactRegularFile,
 } from "../../artifacts/ArtifactFileOperation.js";
+import { fileSnapshotPartialObservationSchema } from "../../domain/fileSnapshotObservation.js";
 import { ArtifactReaderFailure } from "../../artifacts/ArtifactReader.js";
 import { ArtifactResourceScope } from "../../artifacts/ArtifactResourceScope.js";
 import { OwnedDirectoryHandle } from "../../filesystem/OwnedDirectoryHandle.js";
@@ -13,6 +14,8 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { TextDecoder } from "node:util";
 import { normalizeArtifactPath } from "../../artifacts/ArtifactPaths.js";
 import {
+  AnalysisAccessDeniedError,
+  AnalysisArtifactChangedError,
   AnalysisCancelledError,
   AnalysisInputError,
   AnalysisOutputError,
@@ -89,22 +92,37 @@ const scanRecoveryFile = async (
           before.size !== bytes ||
           [after, current].some((state) => !sameRegularFileState(before, state))
         )
-          throw new AnalysisOutputError(
+          throw new AnalysisArtifactChangedError(
             OPERATION,
+            path,
             `File identity changed while reading: ${path}`,
           );
         return { sha256: hash.digest("hex"), bytes };
       },
     );
   } catch (cause: unknown) {
-    if (
-      cause instanceof ArtifactFileCleanupFailure ||
-      cause instanceof ArtifactFileCancelled
-    )
-      throw cause;
+    if (cause instanceof ArtifactFileCleanupFailure) throw cause;
+    if (cause instanceof ArtifactFileCancelled)
+      throw new AnalysisCancelledError(OPERATION, {
+        cause: cause.fileCancellation.reason,
+        partialObservation: fileSnapshotPartialObservationSchema.parse(
+          Object.assign({}, cause.fileCancellation.outcome.value, {
+            kind: "file-snapshot-hash",
+            path,
+          }),
+        ),
+      });
     if (cause instanceof ArtifactReaderFailure && cause.reason === "cancelled")
       throw new AnalysisCancelledError(OPERATION, {
         cause: artifactFileCancellationCause(cause),
+      });
+    if (
+      cause instanceof Error &&
+      "code" in cause &&
+      (cause.code === "EACCES" || cause.code === "EPERM")
+    )
+      throw new AnalysisAccessDeniedError(OPERATION, path, cause.code, {
+        cause,
       });
     if (cause instanceof NonRegularFileReadError)
       throw new AnalysisOutputError(
@@ -169,8 +187,9 @@ const snapshotRecoveryInput = async (
   } catch (cause: unknown) {
     if (
       cause instanceof AnalysisCancelledError ||
-      cause instanceof ArtifactFileCleanupFailure ||
-      cause instanceof ArtifactFileCancelled
+      cause instanceof AnalysisAccessDeniedError ||
+      cause instanceof AnalysisArtifactChangedError ||
+      cause instanceof ArtifactFileCleanupFailure
     )
       throw cause;
     // The operation-wide input allowance is a deterministic byte budget, not

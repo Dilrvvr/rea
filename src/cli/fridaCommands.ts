@@ -18,6 +18,10 @@ import type { CliInstance } from "./types.js";
 import { withCommandCancellation } from "./commandCancellation.js";
 import { finishAnalysisCommand } from "./finishAnalysisCommand.js";
 
+/** Script sources stay optional in the options schema; exactly one is required. */
+const exactlyOneScriptSource =
+  "Provide exactly one of --script or --script-file.";
+
 /** Register Frida discovery and one-shot instrumentation CLI operations. */
 export const registerFridaCommands = (
   cli: CliInstance,
@@ -136,7 +140,7 @@ export const registerFridaCommands = (
       ),
   });
   cli.command(CLI_COMMANDS.instrumentWithFrida, {
-    description: "Run one Frida script against a selected process and detach",
+    description: `Run one Frida script against a selected process and detach. ${exactlyOneScriptSource}`,
     args: z.object({
       mode: z
         .enum(["attach", "spawn"])
@@ -153,12 +157,17 @@ export const registerFridaCommands = (
           .min(1)
           .optional()
           .describe("Frida device identifier"),
-        script: z.string().optional().describe("Inline JavaScript to load"),
+        script: z
+          .string()
+          .optional()
+          .describe(`Inline JavaScript to load. ${exactlyOneScriptSource}`),
         scriptFile: z
           .string()
           .min(1)
           .optional()
-          .describe("Path to JavaScript source file"),
+          .describe(
+            `Path to JavaScript source file. ${exactlyOneScriptSource}`,
+          ),
         argument: z
           .array(z.string())
           .optional()

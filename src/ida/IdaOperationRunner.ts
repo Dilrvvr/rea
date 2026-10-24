@@ -71,6 +71,7 @@ const unknownBody = {
 const identity = (fn: IdaFunction) => ({
   address: fn.address,
   name: fn.name,
+  symbol: null,
   classification: null,
   body: unknownBody,
 });
@@ -120,12 +121,20 @@ export class IdaOperationRunner {
     tool: string,
     args: Readonly<Record<string, JsonValue>>,
   ): Promise<JsonValue> {
-    if (this.options.signal?.aborted) throw new AnalysisCancelledError(tool);
+    if (this.options.signal?.aborted)
+      throw new AnalysisCancelledError(tool, {
+        cause: this.options.signal.reason,
+      });
     const scoped =
       this.database === undefined ? args : { ...args, database: this.database };
-    const result = await this.connection.call(tool, scoped);
+    const result = await this.connection.call(tool, scoped, {
+      signal: this.options.signal,
+    });
     this.raw.push({ tool, arguments: scoped, result });
-    if (this.options.signal?.aborted) throw new AnalysisCancelledError(tool);
+    if (this.options.signal?.aborted)
+      throw new AnalysisCancelledError(tool, {
+        cause: this.options.signal.reason,
+      });
     return result;
   }
 
@@ -166,6 +175,19 @@ export class IdaOperationRunner {
    * addresses were reported by IDA itself.
    */
   async resolve(query: string, requestedBy?: string): Promise<IdaFunction> {
+    if (query.startsWith("file-offset:"))
+      throw new AnalysisInputError(
+        requestedBy ?? "procedure_address",
+        undefined,
+        [
+          {
+            path: ["procedure"],
+            reason: "invalid_value",
+            message:
+              "IDA does not support file-offset: procedure selectors. Select Ghidra for source-file coordinates or supply an IDA analysis address or exact procedure name.",
+          },
+        ],
+      );
     if (this.protocol !== "legacy") {
       const item = modernLookupSchema.parse(
         await this.call("lookup_funcs", { queries: [query] }),

@@ -31,12 +31,35 @@ import { hasXmlPlistSignature } from "../../../src/domain/apple/appleArchiveForm
 import { parseExecutableHeader } from "../../../src/domain/binaryTarget.js";
 import { createEvidence, parseEvidence } from "../../../src/domain/evidence.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
+import { javaClassFile } from "../../fixtures/javaClassFile.js";
 import {
   arArchive,
   CPU,
   fatImage,
   machoImage,
+  rpathCommand,
+  codeSignatureCommand,
 } from "../../../src/artifacts/apple/MachoImage.fixture.js";
+
+it.each([4000, 9000])(
+  "refuses a JVM class with %i unused constant bytes without claiming FAT identity",
+  async (constantBytes) => {
+    const directory = await createTestTempDirectory("rea-class-target-");
+    const path = join(directory, "input.class");
+    await writeFile(path, javaClassFile(constantBytes));
+    const resolved = await parseBinaryTarget(path);
+    expect(resolved).toMatchObject({
+      ok: false,
+      error: { reason: "unsupported binary format" },
+    });
+    if (resolved.ok) throw new Error("JVM class was admitted as executable");
+    expect(projectAnalysisError(resolved.error)).toMatchObject({
+      code: "target_unavailable",
+      category: "unsupported_target",
+      details: { reason: "unsupported binary format" },
+    });
+  },
+);
 
 it.each([0x01c0, 0x01c2, 0x01c4, 0xaa64])(
   "retains original PE COFF machine %i through file-backed target resolution",
@@ -756,9 +779,11 @@ describe("binary target I/O: explicit kinds and executable headers", () => {
   it("checks Mach-O load commands against the whole file beyond the probe", async () => {
     const directory = await createTestTempDirectory("rea-target-");
     const path = join(directory, "large-commands");
-    const header = thinMach(0xcffaedfe, 0x0100000c);
-    header.writeUInt32LE(8192, 20);
-    await writeFile(path, Buffer.concat([header, Buffer.alloc(8192)]));
+    const firstCommand = rpathCommand("@loader_path/" + "a".repeat(8192));
+    const bytes = Buffer.from(
+      machoImage({ commands: [firstCommand, codeSignatureCommand()] }),
+    );
+    await writeFile(path, bytes);
     const result = await parseBinaryTarget(path, {
       cwd: directory,
       hostArchitecture: "arm64",
@@ -766,6 +791,22 @@ describe("binary target I/O: explicit kinds and executable headers", () => {
     expect(result.ok && result.value).toMatchObject({
       format: "mach-o",
       architecture: "arm64",
+    });
+
+    // The second command's header lies beyond the initial 4096-byte probe.
+    // Corrupting it must fail admission even though the prefix is unchanged.
+    bytes.writeUInt32LE(0, 32 + firstCommand.length + 4);
+    await writeFile(path, bytes);
+    const malformed = await parseBinaryTarget(path, {
+      cwd: directory,
+      hostArchitecture: "arm64",
+    });
+    expect(malformed).toMatchObject({
+      ok: false,
+      error: {
+        path,
+        reason: `load command 1 at offset ${firstCommand.length} has invalid cmdsize 0`,
+      },
     });
   });
 });
@@ -1118,6 +1159,23 @@ describe("binary Info.plist app bundle targets", () => {
 });
 
 describe("DOS binary target I/O", () => {
+  it("retains the declared PE signature when its overlapping layout is unsupported", async () => {
+    const directory = await createTestTempDirectory("rea-overlapping-pe-");
+    const path = join(directory, "overlap.exe");
+    await writeFile(path, pe(0x014c, 4));
+    const result = await parseBinaryTarget(path);
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        reason: expect.stringContaining("Unsupported overlapping PE header"),
+        diagnostics: {
+          unsupported_layout: true,
+          mz_windows_header: { state: "declared", offset: 4, signature: "PE" },
+        },
+      },
+    });
+  });
+
   it("retains valid DOS facts while refusing automatic selection for an unresolved pointer", async () => {
     const directory = await createTestTempDirectory("rea-ambiguous-mz-target-");
     const path = join(directory, "legacy.exe");

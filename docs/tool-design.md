@@ -116,6 +116,13 @@ artifact can execute successfully.
 
 ## Own the lifecycle
 
+`SafeOutputTree` publishes only after file readback, nested-directory fsync
+from children to parents, and root-parent fsync on hosts that support directory
+syncing. Windows skips directory fsync. Failed writes retain a separate pending
+identity admission only until identity is captured; rollback retries retain
+unremoved file/directory identities and open handles independently, so confirmed
+unlink progress cannot be re-admitted through a closed descriptor.
+
 For tools that acquire resources, identify the owner and the observations that
 establish each transition. Include temporary files and one-shot commands, as
 well as persistent engine sessions. Use the existing provider contracts;
@@ -144,6 +151,11 @@ providers need not expose identical state machines.
   waits for owned cleanup and retains its failure. Provider closure is distinct
   from caller cancellation. Retained cleanup capabilities block replacement;
   derive readiness from the current startup's completion and live connection.
+- Session `cleanup_pending` includes retained blockers from external mutation
+  owners until those owners confirm release. Closing the analysis session does
+  not release resources owned by an external debugger. Reading a selected
+  analysis snapshot is part of `open_binary`; cancellation keeps that operation
+  and the caller's reason through the shared JSON reader.
 - For cancellable observations, carry cancellation through result consumption
   and awaited cleanup. Before returning success, check the signal after the
   last awaited finalization step.
@@ -154,6 +166,9 @@ providers need not expose identical state machines.
   Shared command owners must retain the observed cancellation reason separately
   from physical failures and cleanup ownership. Carry that fact through failure
   wrapping so adapters can preserve the exact reason without interpreting it.
+  ZIP member streams retain the exact signal reason; hdiutil wrappers consume
+  the command owner's typed cancellation record and keep physical command
+  failures separate, even if a host error is named `AbortError`.
   Client cancellation alone does not prove native work stopped.
   For atomic publication, document the cancellation cutoff and preserve any
   committed output's publication receipt.
@@ -177,12 +192,19 @@ providers need not expose identical state machines.
   reports are released; releasing one child cannot clear another child's status.
 - Await one-shot cleanup without discarding the completed result or primary
   diagnostic. Preserve partial observations, remaining resources, and the cleanup
-  owner's recovery instructions. CLI adapters should reuse
+  owner's recovery instructions. While cleanup remains unconfirmed, canonical
+  errors keep `cleanup_incomplete` and live resources while taking category,
+  operation and failure details from the retained typed primary. Nested cleanup
+  composition does not replace that semantic identity. Finalization reports
+  remain attached to their owning envelope while cleanup is pending and after
+  confirmed release. CLI adapters should reuse
   [`finishAnalysisCommand`](https://github.com/morluto/rea/blob/main/src/cli/finishAnalysisCommand.ts) where its contract
   applies rather than duplicate close/finally handling.
 - Give descriptor-backed reads an owner before opening the file. A rejected
-  close must retain the exact handle and preserve any earlier failure. If an
-  abortable caller stops waiting, keep the underlying work in that owner's
+  close must retain the exact handle and preserve any earlier failure.
+  Stable file reads expose completed values separately from cancellation so
+  consumers retain acquired identity facts after successful close or cleanup retry.
+  If an abortable caller stops waiting, keep the underlying work in that owner's
   lifetime so shutdown cannot report release before finalization settles.
   Admit the entire inspection once, including later reads and finalization.
   Helpers must borrow that admission or use an operation child scope; re-entering
@@ -230,6 +252,11 @@ filtering and paging; an item missing from that page is not proved absent from
 the target. Structured completeness and absence fields must agree with the
 stated limitations.
 
+File-error wrappers retain the format owner's specific diagnostic and recovery
+text. Strict JSON file input, for example, keeps the byte-order-mark explanation
+and UTF-8 recovery through CLI/MCP projection rather than replacing it with
+generic invalid-file advice. Consumers do not classify parser message text.
+
 Update canonical contracts, output schemas, examples, generated artifacts, and
 relevant docs together. Verify converted advertised schemas and success,
 malformed, unavailable, cancellation, and partial outcomes through affected
@@ -241,6 +268,20 @@ Zod's tuple projection omits implicit length bounds and Draft 2020-12 `items`,
 which some clients require even alongside `prefixItems`. Tuples with a rest
 schema also need explicit minimum lengths. Check parser/schema parity for empty,
 short, overlong, and malformed values in both input and output projections.
+
+CLI translations must reuse the canonical semantic fields, enum membership and
+list bounds. Document transport differences such as relative path spelling and
+JSON text decoding; reject empty selections before path normalization. Preserve
+required alternatives across positional arguments and options. When the CLI
+schema format separates those groups and cannot express their relationship,
+state the required choice in command discovery/help and retain aggregate admission
+before target access. Test emitted schemas and parser behavior together, including
+omission, empty strings, alternatives, conflicts and boundary list counts.
+
+Expected input failures must retain caller field/index paths and safe constraints.
+Internal operation/input envelopes are not caller paths. Reuse the input issue
+projector at the admission owner; a schema cause alone does not supply correction
+metadata to either adapter.
 
 When discoverability changes, evaluate representative broad, direct, and negative
 tasks on the intended host. Record host/model/catalog, selected tools, arguments,

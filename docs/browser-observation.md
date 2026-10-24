@@ -12,13 +12,20 @@ For request/response bodies and traffic debugging, see
 [Fiddler Everywhere captures and MCP](web-network-captures.md#reading-fiddler-captures-saz).
 Inspect native SAZ or HAR 1.2 offline with REA, or connect Everywhere's separate MCP server.
 
+HTTP discovery and browser WebSocket inputs require an explicit port. An
+explicit default `:80` remains valid and is retained in the canonical endpoint;
+omitting the port remains invalid. HTTP `/json/list` discovery preserves usable
+siblings when optional metadata is malformed: attachment becomes unknown and
+row/field diagnostics appear in `limitations`. Target identity and socket
+authority are validated independently before selection and connection.
+
 ## Shipped surfaces
 
 - `list_browser_targets` / `rea list-browser-targets` discovers all eligible page targets at the endpoint by default, with an optional exact-origin filter.
 - `inspect_web_page` / `rea inspect-web-page` captures DOM structure, accessibility nodes, scripts, resources, safe response/DOM metadata, attach-window network and console metadata, WebSocket frame sizes, workers, quota, and optionally selected storage key names, redacted storage-content fingerprints, or script sources.
 - `analyze_web_bundle` / `rea analyze-web-bundle` parses selected script artifacts without execution and derives chunk edges, route and endpoint candidates, vendor fingerprints, static WebMCP declarations, and optionally source-map/original-source evidence.
 - `observe_web_session` / `rea observe-web-session` arms an observation window of the requested duration for an external user action and records ordered reload, SPA navigation, redirect, failure, lifecycle, and target-termination metadata.
-- `discover_webmcp_tools` / `rea discover-webmcp-tools` uses the experimental CDP WebMCP domain to return every in-scope registration and its complete observed `input_schema` declaration and canonical `input_schema_sha256` digest inline. Declarations are untrusted JSON data, including declared types, required fields, enums, examples and reference URLs. REA does not resolve schema references. These fields replace `input_schema_shape`. Registrations with the same name and URL in distinct observed frames retain separate identities. `tool_key` includes the observed frame ID; it is not a stable identity across navigation or browser sessions. Same-frame registration updates replace that owner only, and removal leaves other owners intact. Declared `readOnly`, `untrustedContent`, `consequential`, and `autosubmit` annotation hints are reported per registration: `true`/`false` are declared values, `null` means the declaration did not provide the hint in that capture, and a missing `consequential` key means the hint was not recorded, either in a historical capture or because the observed annotation was invalid. Consult discovery completeness and exclusions to distinguish these cases. Malformed annotation values or registration stacks retain the registration with incomplete coverage and an `invalid_protocol_value` exclusion. Other malformed protocol payloads can fail discovery explicitly. REA never exposes `WebMCP.invokeTool`.
+- `discover_webmcp_tools` / `rea discover-webmcp-tools` uses the experimental CDP WebMCP domain to return observed in-scope registrations and their complete observed `input_schema` declaration and canonical `input_schema_sha256` digest inline. Declarations are untrusted JSON data, including declared types, required fields, enums, examples and reference URLs. REA does not resolve schema references. An omitted optional `inputSchema` is a valid parameterless registration, represented by null schema and digest. These fields replace `input_schema_shape`. Registrations with the same name and URL in distinct observed frames retain separate identities. `tool_key` includes the observed frame ID; it is not a stable identity across navigation or browser sessions. Same-frame registration updates replace that owner only, and removal leaves other owners intact. Declared `readOnly`, `untrustedContent`, `consequential`, and `autosubmit` annotation hints are reported per registration: `true`/`false` are declared values, `null` means the declaration did not provide the hint in that capture, and a missing `consequential` key means the hint was not recorded, either in a historical capture or because the observed annotation was invalid. Consult discovery completeness and exclusions to distinguish these cases. Malformed annotation values or registration stacks retain the registration with incomplete coverage and an `invalid_protocol_value` exclusion. Other malformed protocol payloads can fail discovery explicitly. REA never exposes `WebMCP.invokeTool`.
 
 - `compare_web_captures` / `rea compare-web-captures` compares passive captures or exact-step-aligned browser scenarios. Scenario results commit reproducible literal normalization and expose alignment failures plus artifact-level action, screenshot, DOM, accessibility, URL, history, storage, and event differences. Missing or truncated evidence is never treated as equivalence.
 
@@ -54,6 +61,20 @@ from a protocol omission. Rejected DOM facts also mark derived URL and agent-hin
 metadata incomplete, while valid facts from other nodes and documents remain
 available in the capture.
 
+Page network and console coverage starts independently at the first observed
+event from that domain or its successful enable acknowledgment. The capture's
+lifecycle start is earlier and does not establish domain readiness. Events
+received before the enable reply remain part of the observation.
+
+Worker output is a final target-inventory snapshot. `attached` describes any
+debugging client, not an REA-owned observing session. The selected page-session
+collector does not collect worker-session requests, console events, or scripts,
+and workers that disappeared before the snapshot may be missing; worker
+coverage is therefore attach-limited. Missing ownership metadata is reported as
+`unattributed_target` with unavailable worker attribution, separately
+from a proven foreign owner excluded as `out_of_target_scope`. A shared origin
+alone establishes neither relationship.
+
 Passive comparison keeps lookup identity, cross-capture correspondence, content
 evidence, and inventory coverage separate:
 
@@ -73,6 +94,15 @@ content. Actual JSON properties with those names remain content. Reference-only
 objects, unsupported values, and opaque cookie partition identities remain
 incomplete. Previously exported fingerprints are not recomputed; recapture both
 sides when comparing captures produced across this decoder change.
+
+Script comparison groups observations by reported URL and compares unordered
+content samples. Producer inventory keys include optional metadata, so a changed
+key cannot by itself prove script removal or addition. Missing module, length,
+language or source-hash facts remain unknown; shared known values and complete
+retained source digests can still prove a group change. Partial inventories use
+the same omission rule as repeated HTTP samples. WebMCP dropped-tool counts also
+prevent equality, and two incomplete owner inventories cannot prove tool
+correspondence merely from their different retained registrations.
 
 - `capture_web_screenshot` / `rea capture-web-screenshot` returns a content-addressed visible-viewport PNG.
 - `compare_web_screenshots` / `rea compare-web-screenshots` performs bounded local PNG pixel comparison without OCR or external services.
@@ -116,6 +146,11 @@ provider-owned browser or a caller-selected external browser. Separate providers
 preserve these authority and lifecycle differences. They share one exclusion
 vocabulary (`BrowserExclusionReason`): every denial reason maps onto it, even
 where a wire schema keeps a narrower historical bucket.
+
+Passive page and Inspector capture enable the `Debugger` domain. A target's
+`debugger` statement can then pause execution; these observation paths do not
+suppress pauses with `Debugger.setSkipAllPauses` or resume the target. Their
+lack of explicit pause commands does not guarantee uninterrupted execution.
 
 CDP attachment is not a guarantee that the browser preserves all state.
 Chromium can clear another client's `navigator.platform` emulation when REA's
@@ -287,7 +322,11 @@ read as registration state only after domain availability is confirmed.
 Discovery is attach-only: the command needs a reachable loopback CDP endpoint
 and a target ID from `list_browser_targets`, and it never navigates, reloads,
 or evaluates the page. Observe the page in the state you want to measure;
-registered tools reflect the document as loaded.
+registered tools reflect what the protocol delivered. If an in-scope subframe
+already exists when discovery attaches, `webmcp_tools` remains attach-limited:
+Chromium replay may omit its older registrations. Later live registrations
+retain their frame ownership but do not establish recovery of those missing
+descriptors. REA does not reload, evaluate, or invoke tools to fill that gap.
 
 Accessibility names/descriptions, console primitive text, JSON body shapes, WebSocket shapes, script content, and storage key names are selected independently:
 
@@ -329,6 +368,20 @@ are reported in the result.
 Call `list_browser_targets` first because target IDs are browser-instance-specific. REA rechecks the selected target's current type and origin immediately before attaching. Without an origin filter, discovery lists all eligible pages; an individual capture defaults to the selected page's current origin.
 
 REA establishes a main-frame origin boundary before enabling Runtime, Debugger, or Network observation, rechecks it before document capture, and validates it again afterward. If the main frame navigates during final capture, REA discards the mixed result and returns `target_changed`.
+An observed navigation also takes precedence over failures from stale
+document reads, such as a script ID invalidated by reload; cancellation remains
+cancellation. Retry after navigation settles, or refresh target discovery if
+the selected page was replaced. Origin-scope refusals from page inspection,
+runtime observation, screenshots, and WebMCP discovery explain the permitted
+HTTP(S) origin scope and direct the caller to select a permitted document or
+explicitly revise `allowed_origins`. Page capture also preserves an observed
+main-frame scope violation when a later document read fails. An unresolved
+initial main frame does not establish an origin violation; its bounded startup
+retries retain a distinct refusal.
+
+Screenshot capture requires a valid main-frame identity. Malformed identity
+produces a protocol failure; a readable child frame cannot substitute for the
+main frame.
 
 The web-session timeline uses CDP monotonic seconds where the event producer
 provides a comparable timestamp; absent or invalid timestamps are `null` rather
@@ -342,7 +395,12 @@ events retain their paired prior-hop response context when the timestamped
 next-request event falls inside the window. The pre-arm timeline buffer is bounded
 by original CDP message bytes. If clock sampling completes after that budget is
 exhausted, the operation returns `payload_limit` instead of a partial window.
-Cancellation and clock-request failures retain their own outcomes.
+Cancellation and clock-request failures retain their own outcomes. Session
+`load_failed` rows require a previously observed main-frame `Document` request;
+subresources, child-frame requests and failures without admitted request ownership
+are excluded. Redirects reuse their request identity, and completed/failed requests
+release it. Active request identity metadata uses the existing 8 MiB retained-event
+allowance; exhaustion fails the observation explicitly instead of guessing scope.
 
 ## Data minimization
 
@@ -371,7 +429,7 @@ REA retains local observation data and removes only URL userinfo credentials, ex
 - Supported DOM URL attributes are projected separately as resolved destinations. Empty `action` on HTML or XHTML forms and empty `formaction` on HTML or XHTML submit controls resolve to the document URL; other relative URL attributes resolve against the captured document base.
 - Accessibility structure and reported roles are retained by default, while names and descriptions require `include_accessibility_text: true`. The browser protocol may omit an individual role; that role remains unknown for comparison. Other observed accessibility differences can still establish a change.
 - Network observations retain method, status, MIME type, size, type, initiator stack location, and complete URLs with userinfo credentials removed. Redirects reported by CDP are attached as ordered `redirects` on the one request ID, with the prior request URL, CDP response URL, method/type, response status/MIME/encoded length, request timestamp, and the next `requestWillBeSent` event timestamp. CDP delivers `redirectResponse` with that next request event, so the latter is an event boundary rather than an exact response timestamp. Redirect response headers and bodies are discarded; hops outside the selected origins are discarded with the request chain. Headers are discarded after an allowlisted projection of length/encoding, structured CSP/Link/policy fields, and untrusted agent hints. Cookies and authorization headers are never retained.
-- Request/response bodies are not requested or parsed by default. When selected, only allowed-origin JSON media types are read, converted immediately to complete value-free typed paths, types and observation counts, and discarded. Each path segment is either `{ "kind": "property", "name": "raw property name" }` or `{ "kind": "array-element" }`; array-element types include primitives and nested arrays. Literal `*` properties remain distinct from array elements. `Network.getResponseBody` is never sent unless JSON body shape capture is selected. A JSON-typed request body that CDP reports through `hasPostData` but omits from `postData`, or that cannot be parsed as JSON, makes `json_body_shapes` unavailable. That request's `body_shapes.status` is `partial`, not `included`, when only its response shape was captured. Comparison uses body shapes only when both captures selected them, and compares request/response shapes only where both observations provide those facts. Unavailable or truncated selected coverage makes equivalence unknown; observed differences still report changed.
+- Request/response bodies are not requested or parsed by default. When selected, only allowed-origin JSON media types are read, converted immediately to complete value-free typed paths, types and observation counts, and discarded. Each path segment is either `{ "kind": "property", "name": "raw property name" }` or `{ "kind": "array-element" }`; array-element types include primitives and nested arrays. Literal `*` properties remain distinct from array elements. `Network.getResponseBody` is never sent unless JSON body shape capture is selected. A JSON-typed request body that CDP reports through `hasPostData` but omits from `postData`, or that cannot be parsed as JSON, makes `json_body_shapes` unavailable. That request's `body_shapes.status` is `partial`, not `included`, when only its response shape was captured. Base64 response bytes must be valid UTF-8 before JSON interpretation; invalid bytes leave the response shape unavailable and preserve any observed request shape and network metadata. Producer-decoded strings and genuine U+FFFD characters retain their reported meaning. Comparison uses body shapes only when both captures selected them, and compares request/response shapes only where both observations provide those facts. Unavailable or truncated selected coverage makes equivalence unknown; observed differences still report changed.
   For normalized passive inputs with complete request inventories on both sides,
   request additions and removals remain observable even when selected body shapes,
   response metadata, or WebSocket coverage are unavailable. HTTP request and
@@ -412,6 +470,11 @@ Frames, resources, scripts, events, and workers outside the selected origin scop
 Retained workers include validated opener-target and parent-frame IDs when CDP
 provides them; these relationships do not expand the exact-origin boundary or
 prove static module ownership.
+Workers without either relationship are withheld with an `unattributed_target`
+exclusion and `workers` in `unavailable_sections`: a same-origin URL does not
+establish which page owns a worker. A supplied relationship to another target or
+frame remains `out_of_target_scope`. Missing ownership also remains unknown when
+the worker URL is empty; withheld target details are not returned.
 
 ## Completeness and limits
 
@@ -523,10 +586,17 @@ Network and console coverage starts only after REA attaches and enables the rele
 
 Source maps are not fetched by inspection. Bundle analysis fetches them only when `fetch_source_maps` is selected, with exact-origin redirect checks and no credentials, cookies, or referrer. Each fetch operation uses `source_map_fetch_timeout_ms` (default 30000) and a 64 MiB aggregate streamed-response budget across redirects. The byte budget has no runtime override. A fetch overrun is an item limitation, not a thrown analysis timeout. A deadline or byte-limit failure remains explicitly unavailable and makes bundle completeness partial. Source-map decoding also bounds raw resolved identities to 64 MiB and aggregate inline evidence to 32 MiB. Failed maps preserve their failure context when it fits; if another context cannot fit, collection stops with the full requested count, the returned processed count, and an explicit unknown-results limitation. Retained mappings and original sources are returned inline. See [source-location limits](web-source-location.md) for the structural decoder bounds. Original source artifacts with `.ts`, `.tsx`, `.mts`, or `.cts` suffixes carry `text/typescript`; other source names retain `text/javascript`.
 
-source-map items retain the script's `declared_url` separately from the observed
-`effective_url`. successful maps use the latter as their source-resolution base.
-failed fetches retain the last response URL observed within the approved origins;
-`effective_url` is `null` when no response was observed. query parameters are
+When fetching is selected, source-map `excluded` facts preserve the capture
+ledger's reasons and counts for declarations rejected before download. No
+disallowed URL details are retained or fetched. `requested` and `processed`
+count the admitted fetch requests; exclusions are counted separately. Excluded
+declarations make the collection unavailable, or partial when maps were retained.
+An empty collection with no declarations remains `not_requested`.
+
+Source-map items retain the script's `declared_url` separately from the observed
+`effective_url`. Successful maps use the latter as their source-resolution base.
+Failed fetches retain the last response URL observed within the approved origins;
+`effective_url` is `null` when no response was observed. Query parameters are
 preserved, and both URLs count toward the inline evidence budget.
 Current fetches emit a string or null; historical observations may omit
 `effective_url` without changing their stored content or Evidence identity.
@@ -541,6 +611,9 @@ validation.
 ## Non-goals and threat model
 
 The browser provider deliberately does not expose generic CDP commands, `Runtime.evaluate`, WebMCP invocation, navigation, input, downloads, page closure, or browser closure. Screenshot capture is the sole pixel surface and returns an image only when requested. REA disables the domains it enabled, detaches the target session, and closes only its own WebSocket.
+Discovery and attachment errors remain primary if closing REA's socket also
+fails. The cleanup failure is reported alongside the original command failure;
+it cannot replace the operation diagnostic.
 
 This feature is not a browser sandbox or network containment mechanism. The attached page and browser continue running with their existing privileges and may make external requests independently of REA. CDP gives deep access to the selected browser profile, so use a dedicated profile, include only origins you intend to inspect, and treat other same-user processes as outside this boundary.
 

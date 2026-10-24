@@ -23,7 +23,10 @@ import {
   createDarwinProcessRunTokenReader,
   type DarwinProcessReaderCompiler,
 } from "./DarwinProcessRunTokenReader.js";
-import { readProcessRunTokens } from "./ProcessRunTokenObservations.js";
+import {
+  ProcessRunTokenReadError,
+  readProcessRunTokens,
+} from "./ProcessRunTokenObservations.js";
 import type {
   OwnedProcessGroup,
   ProcessGroupObservation,
@@ -272,7 +275,7 @@ export const observeOwnedProcessLineage = async (
       if (observation.runId !== ownership.runId)
         return unavailableLineage(
           ownership,
-          "process lineage contains an unowned or PID-reused process",
+          lineageTokenMismatchReason(member.pid, observation.runId),
         );
       if (member.pid !== launcher.pid) verifiedDescendants.push(member);
       const seeded = examinedRefresh.get(member.pid);
@@ -473,7 +476,7 @@ const observeNativeOwnedProcessLineage = async (
     if (fact.token.runId !== ownership.runId)
       return unavailableLineage(
         ownership,
-        "process lineage contains an unowned or PID-reused process",
+        lineageTokenMismatchReason(member.pid, fact.token.runId),
       );
     const nativeMember = processWithNativeRelation(
       fact.process,
@@ -582,7 +585,7 @@ const classifyIdentitylessLineageRefresh = async (
     if (observation.runId !== ownership.runId)
       return {
         status: "unavailable",
-        reason: "process lineage contains an unowned or PID-reused process",
+        reason: lineageTokenMismatchReason(launcherPid, observation.runId),
       };
   }
   const identityFailure = launcherIdentityFailure(refreshedLauncher, ownership);
@@ -618,7 +621,7 @@ const classifyIdentitylessLineageRefresh = async (
         if (inTree.has(process.pid))
           return {
             status: "unavailable",
-            reason: "process lineage contains an unowned or PID-reused process",
+            reason: lineageTokenMismatchReason(process.pid, observation.runId),
           };
         continue;
       }
@@ -675,6 +678,14 @@ const processWithNativeRelation = (
         processGroupId: identity.relation.processGroupId,
       }
     : undefined;
+
+const lineageTokenMismatchReason = (
+  pid: number,
+  observedRunId: string | undefined,
+): string =>
+  observedRunId === undefined
+    ? `REA_PROCESS_RUN_ID was absent from the readable environment for PID ${String(pid)}; process lineage ownership remains unverified`
+    : "process lineage contains an unowned or PID-reused process";
 
 const unavailableLineage = (
   ownership: OwnedProcessGroup,
@@ -1265,12 +1276,20 @@ export const createSystemProcessOwnershipHost = (
           (entry) => entry.pid === pid,
         );
         if (process === undefined)
-          throw new Error(`process ${String(pid)} is not live`);
+          throw new ProcessRunTokenReadError(
+            pid,
+            "absent",
+            "process_not_in_snapshot",
+          );
         const observation = (await darwinTokens?.read([process], signal))?.get(
           pid,
         );
         if (observation === undefined || observation.state === "unavailable")
-          throw new Error(
+          throw new ProcessRunTokenReadError(
+            pid,
+            observation?.reason === "process_not_in_snapshot"
+              ? "absent"
+              : "unavailable",
             observation?.reason ?? "process run token could not be read",
           );
         const environment: Record<string, string> = Object.create(null);

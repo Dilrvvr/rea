@@ -388,6 +388,7 @@ export class BinarySession
 
   /** External live state cannot be replayed by a direct or composed CLI workflow. */
   allowsSnapshotReplay(operation: AnalysisOperation): boolean {
+    if (operation === "decompile_all") return false;
     if (this.#activeBundleResources !== undefined) return false;
     const capabilities = this.#active?.route.capabilities;
     const descriptor = capabilities?.get(operation);
@@ -1033,6 +1034,7 @@ export class BinarySession
       requestActivitySnapshots: client?.requestActivitySnapshots?.() ?? [],
       providerOperationHealth: client?.operationHealthSnapshot?.() ?? null,
       cleanupPending:
+        this.#externalMutationCleanupFailure?.cleanupIncomplete === true ||
         this.#pendingCleanup !== undefined ||
         this.#pendingBundleResourceCleanup.length > 0 ||
         this.hasPendingFileResources ||
@@ -1141,6 +1143,7 @@ export class BinarySession
       if (!admission.ok) return admission;
       return ok(
         await operation({
+          resourceScope: this.resourceScope,
           execute: (name, arguments_, options) =>
             this.#execute(name, arguments_, options, Promise.resolve()),
         }),
@@ -1422,8 +1425,7 @@ export class BinarySession
     const started = await client.execute("health", {});
     if (started.ok) {
       this.#active = {
-        target: previous.target,
-        profile: previous.profile,
+        ...previous,
         ...run,
         nativeSourceAdmitted: false,
       };

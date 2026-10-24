@@ -304,7 +304,11 @@ const addReference = (
     file: input.file,
     range: input.value.location,
     coverage: input.coverage,
-    relation: resolved?.file?.kind === "native-addon" ? "loads" : "imports",
+    relation:
+      input.value.operation === "load" &&
+      resolved?.file?.kind === "native-addon"
+        ? "loads"
+        : "imports",
     properties: {
       kind: input.value.kind,
       operation: input.value.operation,

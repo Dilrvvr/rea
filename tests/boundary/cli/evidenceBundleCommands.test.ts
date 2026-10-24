@@ -1,4 +1,6 @@
-import { readdir, writeFile } from "node:fs/promises";
+import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
+import { PRE_66_NULL_COVERAGE_EVIDENCE } from "../../../src/domain/evidenceLegacy.fixture.js";
+import { access, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { expect } from "vitest";
@@ -12,6 +14,7 @@ import {
 } from "../../../src/domain/residualUnknown.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 import { cliTest } from "../../support/cli/cliFixture.js";
+import { JSON_BYTE_ORDER_MARK_MESSAGE } from "../../../src/application/Utf8JsonInput.js";
 
 const revisionBundle = () => {
   const records = ["open", "investigate"].map((operation) =>
@@ -52,6 +55,45 @@ const revisionBundle = () => {
   );
   return createEvidenceBundle(records, [initial, revised]);
 };
+
+cliTest.for([
+  "evidence-import",
+  "evidence-export",
+  "compare-left",
+  "compare-right",
+])(
+  "explains a bundle BOM with the format owner's recovery through $0",
+  async (operation, { cli }) => {
+    const root = await createTestTempDirectory("rea-bundle-bom-cli-");
+    const path = join(root, "bundle.json");
+    const canonical = join(root, "canonical.json");
+    const output = join(root, "exported.json");
+    const encoded = JSON.stringify(revisionBundle());
+    const bom = `\uFEFF${encoded}`;
+    await writeFile(path, bom);
+    await writeFile(canonical, encoded);
+    const arguments_ =
+      operation === "evidence-import"
+        ? [operation, path]
+        : operation === "evidence-export"
+          ? [operation, path, output]
+          : operation === "compare-left"
+            ? ["compare", path, canonical]
+            : ["compare", canonical, path];
+    const result = await cli.run({
+      arguments: [...arguments_, "--json"],
+      environment: { REA_LOG_LEVEL: "silent" },
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.json).toMatchObject({
+      code: "evidence_integrity_mismatch",
+      message: JSON_BYTE_ORDER_MARK_MESSAGE,
+      remediation: { action: JSON_BYTE_ORDER_MARK_MESSAGE },
+    });
+    expect(await readFile(path, "utf8")).toBe(bom);
+    await expect(access(output)).rejects.toMatchObject({ code: "ENOENT" });
+  },
+);
 
 cliTest.for([
   "export_evidence_bundle",
@@ -218,5 +260,48 @@ cliTest(
     const markdown = await cli.run({ arguments: [...base, "--format", "md"] });
     expect(markdown.exitCode, markdown.stderr).toBe(0);
     expect(markdown.stdout).toContain("left\\|right\\\\tail<br>next");
+  },
+);
+
+cliTest(
+  "diagnoses an obsolete explicit-null Evidence commitment without claiming the file was modified",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-legacy-coverage-identity-");
+    const path = join(root, "legacy.json");
+    const record = PRE_66_NULL_COVERAGE_EVIDENCE;
+    const bundle = {
+      artifacts: [],
+      providers: [record.provider],
+      environments: [],
+      scenarios: [],
+      captures: [],
+      unknowns: [],
+      records: [record],
+    };
+    await writeFile(path, JSON.stringify(bundle));
+    const imported = await cli.run({
+      arguments: ["evidence-import", path, "--json"],
+    });
+    expect(imported.exitCode).toBe(1);
+    expect(imported.json).toMatchObject({
+      code: "evidence_integrity_mismatch",
+      retryable: false,
+      message: expect.stringContaining(
+        "earlier relationship_coverage identity commitment",
+      ),
+    });
+    const call = await cli.sharedMcpCall?.();
+    if (call === undefined) throw new Error("Expected shared MCP session");
+    const response = await call("import_evidence_bundle", { path });
+    expect(response.isError).toBe(true);
+    expect(parseMcpToolError(response)).toMatchObject({
+      error: {
+        code: "evidence_integrity_mismatch",
+        retryable: false,
+        message: expect.stringContaining(
+          "earlier relationship_coverage identity commitment",
+        ),
+      },
+    });
   },
 );

@@ -1,3 +1,4 @@
+import { analysisOperationInputErrorFromIssues } from "../../domain/inputIssueProjection.js";
 import type { EvidenceWriter } from "../investigation/InvestigationRecordPort.js";
 import { summarizeRetainedAndroidSearch } from "./AndroidSearchEvidenceSummary.js";
 import type { AndroidAnalysisPort } from "./AndroidAnalysisPort.js";
@@ -7,10 +8,7 @@ import {
   androidRequestSchema,
   type AndroidOperation,
 } from "../../domain/android/androidAnalysis.js";
-import {
-  AnalysisCancelledError,
-  AnalysisInputError,
-} from "../../domain/analysisErrorCore.js";
+import { AnalysisCancelledError } from "../../domain/analysisErrorCore.js";
 import type { AnalysisError } from "../../domain/analysisErrorBase.js";
 import { createEvidence, type Evidence } from "../../domain/evidence.js";
 import { jsonObjectSchema } from "../../domain/jsonValue.js";
@@ -36,7 +34,14 @@ export class AndroidAnalysisService {
       );
     const request = androidRequestSchema.safeParse({ operation, input });
     if (!request.success)
-      return err(new AnalysisInputError(operation, { cause: request.error }));
+      return err(
+        analysisOperationInputErrorFromIssues(
+          operation,
+          request.error.issues,
+          input,
+          request.error,
+        ),
+      );
     const target = await parseBinaryTarget(
       request.data.input.path,
       options?.signal === undefined ? {} : { signal: options.signal },

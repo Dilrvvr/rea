@@ -93,6 +93,10 @@ still suppresses all string projection, including in this mode.
   `target.bytes` bind the observation to the exact APK that was decoded.
   The Evidence subject carries the same snapshot digest and caller-selected
   path, including when the original file changes during decoding.
+  A change during snapshot acquisition reports retryable `artifact_changed`;
+  wait for a stable input before retrying. Host read permission failures report
+  `access_denied`, while a missing or non-regular selected path reports
+  `invalid_request` with the rejected `path` field.
 - **Metadata comes from apktool.yml as apktool printed it.** Version codes
   keep their own spelling (`'7'` versus `7`); `package_name` is read from
   the decoded manifest, not inferred.
@@ -178,3 +182,8 @@ exact facts/Evidence parity and bounded task costs are recorded in the
 [shared-decode and table-only checkpoint](https://github.com/morluto/rea/blob/42e1a17d6e6c0487f17be0bae248553c4caba7f7/experiments/analysis-efficiency/apktool-string-tables.md).
 This qualifies selected resource facts, not application execution or independent
 binary resource-decoder completeness.
+
+If the selected APK changes while its private snapshot is copied, acquisition
+returns `artifact_changed`; request-schema correction cannot recover a stable
+snapshot. Launcher spawn permission denial is distinct from a missing launcher,
+and configuration diagnostics retain the selected command and system error.

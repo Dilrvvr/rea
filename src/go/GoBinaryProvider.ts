@@ -1,7 +1,11 @@
 import { isSelectedRegularFileError } from "../filesystem/RegularFile.js";
-import { readStableArtifact } from "../artifacts/readStableArtifact.js";
 import {
-  artifactFilePrimaryFailure,
+  readStableArtifact,
+  completedStableArtifact,
+} from "../artifacts/readStableArtifact.js";
+import {
+  artifactFilePrimaryFacts,
+  type ArtifactFilePrimaryFacts,
   assertArtifactReadActive,
   bindArtifactFileCleanup,
   artifactFileCancellationCause,
@@ -24,7 +28,6 @@ import {
 import {
   goBinarySchema,
   type GoBinary,
-  type GoModuleMetadata,
   type InspectGoBinaryInput,
 } from "../domain/go/goBinary.js";
 import { ProviderAdapterError } from "../domain/providerAdapterError.js";
@@ -37,7 +40,7 @@ import {
   BinaryFormatFailure,
   BinaryResourceFailure,
 } from "../native/metadata/BinaryContainer.js";
-import { parseGoModuleBytes, parseGoModuleText } from "./GoModuleText.js";
+import { fileSnapshotPartialObservationSchema } from "../domain/fileSnapshotObservation.js";
 
 /** Bundled format reader identity; embedded compiler versions are separate observed facts. */
 export const GO_BINARY_PROVIDER_IDENTITY = {
@@ -49,13 +52,26 @@ const OPERATION = "inspect_go_binary";
 const INPUT_BYTES = 256 * 1024 * 1024;
 const OUTPUT_BYTES = 8 * 1024 * 1024;
 
-const failureForPrimary = (cause: unknown, path: string): AnalysisError => {
-  if (cause instanceof AnalysisError) return cause;
-  if (cause instanceof ArtifactReaderFailure && cause.reason === "integrity")
+const failureForPrimary = (
+  facts: ArtifactFilePrimaryFacts,
+  path: string,
+): AnalysisError => {
+  const { cause, origin } = facts;
+  if (origin === "owned-or-classified" && cause instanceof AnalysisError)
+    return cause;
+  if (
+    origin === "owned-or-classified" &&
+    cause instanceof ArtifactReaderFailure &&
+    cause.reason === "integrity"
+  )
     return new AnalysisArtifactChangedError(OPERATION, path, cause.message, {
       cause,
     });
-  if (cause instanceof ArtifactReaderFailure && cause.reason === "cancelled")
+  if (
+    origin === "owned-or-classified" &&
+    cause instanceof ArtifactReaderFailure &&
+    cause.reason === "cancelled"
+  )
     return new AnalysisCancelledError(OPERATION, {
       cause: artifactFileCancellationCause(cause),
     });
@@ -89,7 +105,10 @@ const failureForPrimary = (cause: unknown, path: string): AnalysisError => {
             message: `Selected artifact ${path}: ${cause.message}`,
           },
         ]);
-  if (cause instanceof ArtifactReaderFailure) {
+  if (
+    origin === "owned-or-classified" &&
+    cause instanceof ArtifactReaderFailure
+  ) {
     if (cause.reason === "limit")
       return new AnalysisResourceConstraintError(
         OPERATION,
@@ -130,7 +149,20 @@ const failureForPrimary = (cause: unknown, path: string): AnalysisError => {
 };
 
 const failureFor = (cause: unknown, path: string): AnalysisError => {
-  const primary = failureForPrimary(artifactFilePrimaryFailure(cause), path);
+  const primary = failureForPrimary(artifactFilePrimaryFacts(cause), path);
+  const snapshot = completedStableArtifact(cause);
+  if (snapshot !== undefined) {
+    // This inspect boundary acquires exactly one StableArtifactSnapshot before
+    // metadata decoding. Completion describes that read, not a decoded report.
+    primary.retainPartialObservation(
+      fileSnapshotPartialObservationSchema.parse({
+        kind: "file-snapshot-hash",
+        path,
+        sha256: snapshot.sha256,
+        bytes: snapshot.bytes.length,
+      }),
+    );
+  }
   if (!(cause instanceof ArtifactReaderFailure) || cause.cleanup === undefined)
     return primary;
   const cleanup = new ProviderCleanupError(
@@ -155,8 +187,7 @@ const outputLimit = (path: string) =>
 
 /** Fixed reader boundaries plus unknowns left by the observed metadata. */
 const limitationsFor = (
-  info: { go_version: string | null; module_text: string | null } | null,
-  module: GoModuleMetadata | null,
+  info: GoBinaryImage["build_info"],
   sectionNamesLimitation: string | undefined,
 ): string[] => [
   "Embedded build metadata is observed file content, not proof of compiler identity, dependency authenticity or runtime behavior.",
@@ -173,12 +204,12 @@ const limitationsFor = (
       ]
     : []),
   ...(sectionNamesLimitation === undefined ? [] : [sectionNamesLimitation]),
-  ...(module !== null && module.main === null
+  ...(info !== null && info.module.main === null
     ? [
         "Dependency coverage is unknown because no main-module record was decoded from the embedded module information, as in GOPATH-mode builds. Decoded dependency records remain visible; an empty list does not establish the absence of dependencies.",
       ]
     : []),
-  ...(module?.complete === false
+  ...(info?.module.complete === false
     ? [
         "Some embedded module-text records could not be parsed completely; their original lines are preserved and additional metadata remains unknown.",
       ]
@@ -257,24 +288,6 @@ export class GoBinaryProvider implements GoBinaryPort {
           ...publicImage
         } = image;
         const info = inFile(image.build_info, selected.fileOffset);
-        if (
-          info !== null &&
-          ((info.module_text !== null &&
-            Buffer.byteLength(info.module_text) > OUTPUT_BYTES) ||
-            Buffer.byteLength(info.module_bytes_base64) > OUTPUT_BYTES)
-        )
-          throw outputLimit(input.path);
-        const module =
-          info === null
-            ? null
-            : info.module_text === null
-              ? parseGoModuleBytes(
-                  Buffer.from(info.module_bytes_base64, "base64").subarray(
-                    16,
-                    -16,
-                  ),
-                )
-              : parseGoModuleText(info.module_text);
         const report = {
           ...publicImage,
           artifact: {
@@ -285,8 +298,8 @@ export class GoBinaryProvider implements GoBinaryPort {
           ...(selected.selection === null
             ? {}
             : { selected_slice: selected.selection }),
-          build_info: info === null ? null : { ...info, module },
-          limitations: limitationsFor(info, module, sectionNamesLimitation),
+          build_info: info,
+          limitations: limitationsFor(info, sectionNamesLimitation),
         };
         if (Buffer.byteLength(JSON.stringify(report), "utf8") > OUTPUT_BYTES)
           throw outputLimit(input.path);

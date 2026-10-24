@@ -151,11 +151,12 @@ it.for(["path-input", "target"] as const)(
       read.mockRestore();
       await release?.();
     });
-    const client = new NativeMacOSProvider(
-      {},
-      new NativeFixtureRunner({ file: "ASCII text", plutil: '"value"' }),
-      "darwin",
-    ).createClient(
+    const runner = new NativeFixtureRunner({
+      file: "ASCII text",
+      plutil: '"value"',
+    });
+    const commands = vi.spyOn(runner, "run");
+    const client = new NativeMacOSProvider({}, runner, "darwin").createClient(
       selection === "target"
         ? { kind: "artifact", format: "plist", path, sha256: "0".repeat(64) }
         : nativeMachoTarget(join(root, "target")),
@@ -174,11 +175,9 @@ it.for(["path-input", "target"] as const)(
       operation: "inspect_plist",
     });
     expect(result.error.cleanupResources).toContain(path);
-    expect(result.error.capturedOutput?.stdout).toBe('"value"');
+    expect(result.error.capturedOutput).toBeUndefined();
     const projected = projectAnalysisError(result.error);
-    expect(JSON.stringify(projected).match(/captured_output/gu)).toHaveLength(
-      1,
-    );
+    expect(JSON.stringify(projected)).not.toContain("captured_output");
     expect(result.error.cause).toBeInstanceOf(ArtifactFileCleanupFailure);
     const failure = result.error.cause as ArtifactFileCleanupFailure;
     expect(failure.fileCleanupFailure.outcome).toEqual({
@@ -194,9 +193,8 @@ it.for(["path-input", "target"] as const)(
     expect(attempts).toBe(3);
     expect(result.error.cleanupIncomplete).toBe(false);
     expect(resolvedAnalysisError(result.error).cause).toBe(primary);
-    expect(resolvedAnalysisError(result.error).capturedOutput?.stdout).toBe(
-      '"value"',
-    );
+    expect(resolvedAnalysisError(result.error).capturedOutput).toBeUndefined();
+    expect(commands.mock.calls.map(([tool]) => tool)).toEqual(["file"]);
     if (!first.ok) expect(first.error.cleanupIncomplete).toBe(false);
   },
 );
@@ -334,41 +332,70 @@ it("preserves an opaque cancellation observed during successful prefix close", a
   expect((await client.close()).ok).toBe(true);
 });
 
-it("joins an admitted prefix read when client close starts concurrently", async () => {
-  const { client, path, prototype } = await fixture();
-  let enter!: () => void;
-  let resume!: () => void;
-  const entered = new Promise<void>((resolve) => {
-    enter = resolve;
-  });
-  const gate = new Promise<void>((resolve) => {
-    resume = resolve;
-  });
-  const original = prototype.read;
-  const read = vi
-    .spyOn(prototype, "read")
-    .mockImplementationOnce(async function (
-      this: FileHandle,
-      ...args: Parameters<FileHandle["read"]>
-    ) {
-      enter();
-      await gate;
-      return Reflect.apply(original, this, args);
+it.for(["source", "json", "xml"] as const)(
+  "joins an admitted prefix read and its %s commands when client close starts concurrently",
+  async (route) => {
+    const { client, path, prototype, runner } = await fixture();
+    if (route !== "source") await writeFile(path, "{ name = value; }");
+    const run = runner.run.bind(runner);
+    const commands = vi
+      .spyOn(runner, "run")
+      .mockImplementation(async (tool, args, options) => {
+        const result = await run(tool, args, options);
+        if (route !== "xml" || tool !== "plutil" || !result.ok) return result;
+        const stdout =
+          args[1] === "xml1" ? "<plist><string>value</string></plist>" : "";
+        return ok({
+          ...result.value,
+          stdout,
+          stdoutBytes: Buffer.byteLength(stdout),
+          exitCode: args[1] === "json" ? 1 : 0,
+        });
+      });
+    onTestFinished(() => commands.mockRestore());
+    let enter!: () => void;
+    let resume!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
     });
-  onTestFinished(() => {
+    const gate = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    const original = prototype.read;
+    const read = vi
+      .spyOn(prototype, "read")
+      .mockImplementationOnce(async function (
+        this: FileHandle,
+        ...args: Parameters<FileHandle["read"]>
+      ) {
+        enter();
+        await gate;
+        return Reflect.apply(original, this, args);
+      });
+    onTestFinished(() => {
+      resume();
+      read.mockRestore();
+    });
+    const inspecting = client.execute("inspect_plist", { path });
+    await entered;
+    let finished = false;
+    const closing = client.close().then((result) => {
+      finished = true;
+      return result;
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(finished).toBe(false);
     resume();
-    read.mockRestore();
-  });
-  const inspecting = client.execute("inspect_plist", { path });
-  await entered;
-  let finished = false;
-  const closing = client.close().then((result) => {
-    finished = true;
-    return result;
-  });
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  expect(finished).toBe(false);
-  resume();
-  expect((await inspecting).ok).toBe(true);
-  expect((await closing).ok).toBe(true);
-});
+    const inspected = await inspecting;
+    expect(
+      inspected.ok,
+      inspected.ok ? undefined : inspected.error.message,
+    ).toBe(true);
+    expect((await closing).ok).toBe(true);
+    expect(commands.mock.calls.map(([tool, args]) => [tool, args[0]])).toEqual([
+      ["file", "-b"],
+      ["plutil", route === "source" ? "-lint" : "-convert"],
+      ...(route === "xml" ? [["plutil", "-convert"]] : []),
+    ]);
+  },
+);

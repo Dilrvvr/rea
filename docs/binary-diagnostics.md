@@ -29,6 +29,16 @@ the selected object as a host process, or requests runtime library resolution. T
 uses isolated mode and an owned cache. Exact upstream profiles are recorded in
 [upstream provenance](https://github.com/morluto/rea/blob/main/third_party/pwntools/README.md).
 
+The adapter skips pwntools kernel configuration and version discovery: those
+memory-content scans supply none of this report's fields. Ordinary `IKCFG_ST`
+data is not interpreted as a kernel-config request, and virtual zero-filled
+LOAD tails are reported from their headers without materializing them for that
+scan. GOT/PLT inference and the advertised static mitigation indicators still
+use the pinned upstream implementations. Header-table file ranges are checked
+before dependency seeks. Structural inventory and the convenience-map engine
+still parse the snapshot separately; eliminating that remaining duplication
+requires preserving the upstream GOT/PLT and mitigation facts.
+
 ## Interpreting results
 
 - Artifact path, SHA-256 and size identify original selected bytes. All parsing
@@ -90,6 +100,10 @@ one section or symbol, or a stable page without re-running the decoder. CLI
 one-shot invocations pass portable inline Evidence JSON; an MCP session uses
 the retained `evidence_id`. Page `limit` is required and bounded by the
 measured MCP stdio budget documented on the tool contract.
+Malformed authenticated layout input remains rejected with the owning schema's
+safe field diagnostics under `source.normalized_result`, including the field
+path and type or value reason. Evidence authentication and decoder validation
+remain separate boundaries.
 
 Over MCP, `inspect_binary_layout` with `"detail": "summary"` retains the
 complete layout Evidence in the session and returns only its summary view.
@@ -169,6 +183,31 @@ Output draining waits at most one second,
 subject to earlier cancellation or the startup deadline. `output_incomplete`
 marks a snapshot taken before stream closure; cleanup ownership remains with
 the session until release succeeds.
+
+A kernel or container OOM killer ends Ghidra with `SIGKILL` and prints no
+`OutOfMemoryError`. When a process or protocol failure records
+`exit_signal: "SIGKILL"` and no `stop_requested`, REA reports the signal
+instead of generic `rea doctor` advice. The process supervisor records
+`stop_requested: true` once REA begins stopping Ghidra, before it sends any
+signal, so REA's own SIGKILL is never reported as an outside kill.
+
+On Linux with cgroup v2, REA also reads its own cgroup's `memory.events` before
+launch and again after the kill, locating the group through the cgroup2 mount
+in `/proc/self/mountinfo`. `memory_cgroup` records the group path,
+`oom_kill_before`, `oom_kill_after` and `memory_max`. If the count rose, REA
+returns `resource_constraint` with `resource: "memory"` and `cgroup_memory_max`
+in `reported_limits`. The count covers every process in REA's cgroup and its
+child groups, which can include processes outside REA's process tree when the
+group is shared, so a rise shows that the kernel OOM killer ended a process in
+that cgroup or a child group, not which process it chose. `memory_max` is the
+limit in bytes, `"max"` when the group sets none, or `null` when it could not be
+read; a limit on a parent group is not read. The limit also covers Ghidra's
+native decompiler processes, whose number follows the available CPUs, so the
+advice does not recommend a larger Java heap. When the session had already
+completed an operation, the advice keeps the instruction to reopen the target
+with `open_binary`. Without a cgroup v2 memory group, or when the count did not
+rise, the failure stays `execution_failure` and names the signal as a possible
+out-of-memory kill.
 
 ## Portable PE resources
 
@@ -326,7 +365,48 @@ rea inspect-native-exports ./runtimes/linux-x64/native/libexample.so --json
 ```
 
 The complete Evidence identifies the stable artifact snapshot by path, byte
-count and SHA-256.
+count and SHA-256. Complete delivery remains the default. For a small initial
+MCP reply, select `detail: "summary"`; this retains the complete Evidence and
+returns artifact identity, table coverage and row counts. Use its
+`normalized_result.parent_evidence_id` with `inspect_analysis_view`:
+
+```json
+{
+  "source": {
+    "kind": "retained-evidence",
+    "evidence_id": "ev_<parent digest>"
+  },
+  "view": {
+    "kind": "native-exports",
+    "collection": "exports",
+    "names": ["selected_name"],
+    "fields": ["name"],
+    "offset": 0,
+    "limit": 32
+  }
+}
+```
+
+Names match exactly and preserve every same-name version or alias. Optional
+`indices` selects original row positions, intersecting a name filter when both
+are supplied; empty filters select nothing. `source_index` always remains and,
+with the parent ID, identifies the original export or issue row. Fields default
+to the complete row; an empty field list returns only its identity. ELF `name`
+selection also returns raw-byte and encoding qualifications. Fields from the
+other format are rejected. `collection: "issues"` pages the complete diagnostic
+records, with optional original indices. Offset and limit default to 0 and 64
+and apply to matching rows in original order.
+
+View `coverage` describes the selected page; `summary.coverage` or
+`exports.coverage` preserves source-table coverage. An exhausted or empty page
+does not make a partial source complete. Retained views never reopen the file.
+The CLI uses the same projector and requires a durable bundle for a summary:
+
+```sh
+rea inspect-native-exports ./libexample.so --detail summary --evidence_output ./exports.bundle.json --json
+# Pass the summary's parent ID and the same view as JSON to inspect-analysis-view,
+# together with --evidence-bundle ./exports.bundle.json.
+```
 
 - PE rows reproduce the export directory: each used export-address-table slot
   with its biased `ordinal` (`OrdinalBase` plus the slot index), one row per
@@ -368,9 +448,13 @@ Unresolved symbol versions keep their rows: the version name is null when no
 definition or requirement names the index, and `version` is
 `"unknown"` when the version table cannot be read; coverage is likewise
 `partial`. A dynamic symbol table without its null entry is malformed. An ELF
-without section headers is `unsupported`:
-enumerating dynamic symbols from the dynamic segment is not
-implemented. Mach-O exports are reported by `inspect_macho`.
+without section headers is `unsupported`. With section headers, a missing
+`SHT_DYNSYM` section is also `unsupported` when a `PT_DYNAMIC` segment is
+observed, including a directory containing only the inactive null section.
+Enumerating dynamic symbols from that segment is not implemented. A present
+section directory with neither a dynamic symbol table nor a dynamic segment
+reports a complete empty inventory. Mach-O exports are reported by
+`inspect_macho`.
 
 `max_file_bytes` defaults to 256 MiB (maximum 512 MiB; CLI `--max-file-bytes`).
 Export directories in PE headers are read like those in sections. An export or

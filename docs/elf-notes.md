@@ -64,7 +64,8 @@ not a note header. The current result requires physical file offsets for each
 note and descriptor, which decoded compressed notes cannot provide. This refusal
 does not label compressed note storage as malformed or allocate its declared
 decoded size. Compressed section-name tables remain supported within the limits
-above.
+above. Inspect a separately decompressed copy when these notes are needed,
+retaining the original artifact for provenance.
 
 This workflow does not execute the image or verify GNU build-id uniqueness
 against package catalogs.

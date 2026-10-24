@@ -442,6 +442,11 @@ A read with repeated query values uses replay, because the state query model
 does not infer repeated-parameter semantics. A repeated-query write is refused
 before it can change state for the same reason.
 
+List counters retain their recorded number or digit-string representation.
+Changing a digit-string counter preserves its observed zero-padding width;
+query-total inference remains limited to canonical decimal counts. Path matching
+uses the same segment parser as extraction, preserving empty internal segments.
+
 An item or list view that always spells a clock field otherwise than the
 entity's stored value names that spelling in `clock_formats`, and a value it
 never recorded, such as a created entity's clock, is rendered in it: a list that
@@ -771,8 +776,28 @@ recording replayed in its place and never from a recording whose body the probe 
 two collections can reuse a live id, and an equal pair stays in that collection. A live id in a later request's path, query or body is translated before the
 environment answers, a path parameter by the collection the live path names (a nested collection keeps its parent values, each decoded once, and a literal route segment stays), except a query value that pages a list, such as `limit`
 or `page`. Each call is checked against the served tool's input schema first, as the MCP server checks it. After mapping, two clock values compare by format only (ISO-8601 strings, and epoch numbers under
-`at`, `time`, `date`, `timestamp`, `created`, `updated` or `modified` field names, including snake-case and camel-case forms), and two different values each side generated on its own compare equal: both UUIDs, or one length of
-eight or more with the same character classes and a digit. The report counts each kind of normalised value.
+`at`, `time`, `date`, `timestamp`, `created`, `updated` or `modified` field names, including snake-case and camel-case forms).
+Numeric arrays retain that containing field's clock context through nested
+arrays; an object's own fields establish their own context. Numeric values at
+the body root, in root arrays, or under measurement fields remain literal.
+
+Generated strings normalize only where this confirmed, served write's entity
+response rules identify generation. A `unique` rule or UUID identity rule must
+still compare two UUIDs; a `renewed` rule applies only at its recorded pointers,
+with `*` matching actual array items. Token/sequence strings retain the existing
+format check: equal length of at least eight, the same character classes, and
+a digit. Numeric sequences continue to compare literally unless an ID mapping
+applies. String shape and names such as `token` or `sku` alone do not establish
+generation. Read and replay responses without these facts stay literal except
+for supported clocks and learned IDs. A missing write target replays an absence
+response and does not inherit the successful entity response's generation rules.
+Admitted generated values must also preserve aliases and distinct identities
+within that response. UUID identity uses the generator's case-insensitive
+matching; token and sequence strings retain their literal identity. This
+correspondence ends with the answer and is not inferred across calls.
+The report counts each kind of normalised
+value; the generation rules remain model-derived facts, rather than new
+observations of the application.
 ISO clock offsets are accepted only within RFC 3339's `00`–`23` hour and `00`–`59` minute ranges.
 Probe ordering retains every recorded fractional-second digit in ISO timestamps
 with a four-digit year, `T`, and a `Z` or `±HH:MM` suffix. Equal instants use ordinal order. Other native-Date
@@ -810,16 +835,16 @@ with a JSON pointer and both values cut short:
 | `unmapped-id`   | The application answered with success and the environment did not, for a path id the comparison never mapped |
 
 What a probe did not observe is not counted as the application's behaviour. A record without a usable request line,
-such as a redacted URL or a transaction the capture cannot attribute, is not replayed, nor is a request to another
-origin than the application's (`other-origin`: the probe's origin with the most JSON-like records, as the manifest
+such as a redacted URL or a transaction the capture cannot attribute, is not replayed, nor is a request to an origin different
+from the application's (`other-origin`: the probe's origin with the most JSON-like records, as the manifest
 chooses its own), and a request with no recorded
 answer is made, since it may have changed the application, but not compared: each probe lists them under `unobserved` with the reason, and the summary counts them. A live
 body the probe did not record compares by status only and is counted as `unobserved_bodies`, unless the answer never
 carries one (204, 205, 304, `HEAD`). A browser probe captured without `capture.network.response_body` is refused, as
 is one that makes POST, PUT or PATCH calls without `capture.network.request_body`.
 
-Agreement covers only the calls the probes make, after the mapping the answers allow. Values compared by form, clocks
-and generated values, can still differ in content, and an equal answer after a write shows the state matched for that
+Agreement covers only the calls the probes make, after the mapping the answers allow. Clocks compared by format
+and fields normalized under explicit generation rules can still differ in content, and an equal answer after a write shows the state matched for that
 read, not that the write had no other effect.
 
 ## Compatibility verification

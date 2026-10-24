@@ -335,21 +335,56 @@ it("decodes marshal strings with CPython surrogatepass rules", () => {
   ).toThrow(PythonPycFormatFailure);
 });
 
-it("keeps non-finite float and complex constants JSON-safe", () => {
+it.each([0x73, 0x74, 0x75, 0x61, 0x41, 0x28, 0x5b, 0x3c, 0x3e])(
+  "classifies a negative signed marshal count (tag %i) before applying limits",
+  (tag) => {
+    expect(() =>
+      parse(withConsts([Buffer.concat([Buffer.from([tag]), i32(-1)])])),
+    ).toThrow(PythonPycFormatFailure);
+  },
+);
+
+it("keeps signed zero and non-finite float and complex constants JSON-safe", () => {
   const report = parse(
     withConsts([
       Buffer.concat([Buffer.from([0x67]), f64(Infinity)]),
       Buffer.concat([Buffer.from([0x79]), f64(0), f64(-Infinity)]),
       Buffer.concat([Buffer.from([0x67]), f64(Number.NaN)]),
+      Buffer.concat([Buffer.from([0x67]), f64(-0)]),
+      Buffer.concat([Buffer.from([0x67]), f64(0)]),
+      Buffer.concat([Buffer.from([0x79]), f64(-0), f64(-0)]),
     ]),
   );
   expect(root(report).consts).toEqual([
     { kind: "float", value: "inf" },
     { kind: "complex", real: 0, imag: "-inf" },
     { kind: "float", value: "nan" },
+    { kind: "float", value: "-0.0" },
+    { kind: "float", value: 0 },
+    { kind: "complex", real: "-0.0", imag: "-0.0" },
   ]);
   expect(pythonPycSchema.safeParse(report).success).toBe(true);
   expect(JSON.parse(JSON.stringify(report))).toEqual(report);
+});
+
+it("truncates string previews without introducing a lone surrogate", () => {
+  const prefix = "x".repeat(79);
+  const report = parse(
+    withConsts([
+      marshalUnicode(Buffer.from(`${prefix}😀tail`)),
+      marshalUnicode(
+        Buffer.concat([
+          Buffer.from(prefix),
+          Buffer.from("eda080", "hex"),
+          Buffer.from("tail"),
+        ]),
+      ),
+    ]),
+  );
+  expect(root(report).consts).toEqual([
+    { kind: "str", bytes: 87, truncated: true, value: prefix },
+    { kind: "str", bytes: 86, truncated: true, value: `${prefix}\ud800` },
+  ]);
 });
 
 it("accepts an empty co_filename", () => {
@@ -1590,3 +1625,21 @@ it("leaves 3.11 alpha magics with other code layouts unsupported", () => {
     parse(pythonPycFixture("py311", { magic: 3495 })).header,
   ).toMatchObject({ python_version: "3.11", code_layout: "py311" });
 });
+
+it.each([false, true])(
+  "preserves a source-encoded lone surrogate at the preview boundary (truncated=%s)",
+  (truncated) => {
+    const text = Buffer.concat([
+      Buffer.from("a".repeat(79)),
+      Buffer.from([0xed, 0xa0, 0x80]),
+      ...(truncated ? [Buffer.from("z")] : []),
+    ]);
+    const report = parse(withConsts([marshalUnicode(text)]));
+    expect(root(report).consts[0]).toEqual({
+      kind: "str",
+      value: "a".repeat(79) + "\ud800",
+      bytes: truncated ? 83 : 82,
+      truncated,
+    });
+  },
+);

@@ -1,4 +1,9 @@
 import { z } from "zod";
+import {
+  compareClockInstants,
+  readClock,
+} from "./environmentStateWriteValues.js";
+import type { ScenarioResponseBodyRetention } from "./scenarioCaptureRecords.js";
 import type { AnalysisError } from "../analysisErrorBase.js";
 import { parseExactJson } from "../exactJsonNumber.js";
 import { MAX_JSON_DEPTH, type JsonValue } from "../jsonValue.js";
@@ -26,6 +31,7 @@ import {
 import {
   base64PrefixChars,
   readRecordedResponseBody,
+  recordedResponseBodyIsEmpty,
   type RecordedResponseBody,
 } from "./recordedResponseBody.js";
 import {
@@ -105,6 +111,7 @@ interface RecordEntry {
   readonly origin: string | null;
   readonly contentType: string;
   readonly timed: boolean;
+  readonly subMillisecond: number;
   readonly record: WebNetworkCaptureRecord;
 }
 
@@ -142,23 +149,31 @@ export class EnvironmentStateAccumulator extends EnvironmentManifestAccumulator 
     return false;
   }
 
-  override add(record: WebNetworkCaptureRecord): Result<void, AnalysisError> {
-    const grouped = super.add(record);
+  override add(
+    record: WebNetworkCaptureRecord,
+    scenarioResponseBody?: ScenarioResponseBodyRetention,
+  ): Result<void, AnalysisError> {
+    const grouped = super.add(record, scenarioResponseBody);
     if (!grouped.ok) return grouped;
     try {
       const line = readRecordedRequestLine(record.reported, true, this.scratch);
       if (line === null) return this.overBudget();
       const timing = timingSchema.safeParse(record.reported);
-      const start = timing.success
-        ? Date.parse(timing.data.startedDateTime)
-        : Number.NaN;
-      const timed = timing.success && Number.isFinite(start);
+      const clock = timing.success
+        ? readClock(timing.data.startedDateTime)
+        : undefined;
+      const start = clock?.ms ?? record.ordinal;
+      const timed = timing.success && clock !== undefined;
       if (line.kind === "excluded")
         return line.reason === "url-redacted"
           ? this.#redactedWrite(
               record,
               timing.success && timed
-                ? { start, end: start + timing.data.time }
+                ? {
+                    start,
+                    end: start + timing.data.time,
+                    subMillisecond: clock.subMillisecond,
+                  }
                 : undefined,
             )
           : ok(undefined);
@@ -189,6 +204,7 @@ export class EnvironmentStateAccumulator extends EnvironmentManifestAccumulator 
         origin: line.origin,
         contentType: line.rawMime,
         timed,
+        subMillisecond: clock?.subMillisecond ?? 0,
         record,
       });
       return ok(undefined);
@@ -200,7 +216,13 @@ export class EnvironmentStateAccumulator extends EnvironmentManifestAccumulator 
   /** Keep a successful write whose URL was redacted, with an empty path whose root relates to every type. */
   #redactedWrite(
     record: WebNetworkCaptureRecord,
-    timing: { readonly start: number; readonly end: number } | undefined,
+    timing:
+      | {
+          readonly start: number;
+          readonly end: number;
+          readonly subMillisecond: number;
+        }
+      | undefined,
   ): Result<void, AnalysisError> {
     const parsed = redactedWriteSchema.safeParse(record.reported);
     if (!parsed.success) return ok(undefined);
@@ -222,6 +244,7 @@ export class EnvironmentStateAccumulator extends EnvironmentManifestAccumulator 
       origin: null,
       contentType: "",
       timed: timing !== undefined,
+      subMillisecond: timing?.subMillisecond ?? 0,
       record,
     });
     return ok(undefined);
@@ -278,13 +301,7 @@ export class EnvironmentStateAccumulator extends EnvironmentManifestAccumulator 
     const entry = this.#entries.get(ordinal);
     if (entry === undefined) return false;
     if (entry.facts.status === 204) return true;
-    // Emptiness needs only a tiny decoded prefix; never decode a whole body outside the state budget.
-    const body = readRecordedResponseBody(entry.record, 0);
-    return (
-      body.bodyText === "" &&
-      body.bodyEncoding === undefined &&
-      body.bodyCut !== true
-    );
+    return recordedResponseBodyIsEmpty(entry.record);
   }
 
   /** Project the init state of the manifest's primary origin; records keep timeline order. */
@@ -303,12 +320,15 @@ export class EnvironmentStateAccumulator extends EnvironmentManifestAccumulator 
         ? "recorded-start-time"
         : "record-order";
     const records = entries
-      .map((entry) => entry.facts)
       .sort((left, right) =>
         timeline === "record-order"
-          ? left.ordinal - right.ordinal
-          : left.start - right.start || left.ordinal - right.ordinal,
+          ? left.facts.ordinal - right.facts.ordinal
+          : compareClockInstants(
+              { ms: left.facts.start, subMillisecond: left.subMillisecond },
+              { ms: right.facts.start, subMillisecond: right.subMillisecond },
+            ) || left.facts.ordinal - right.facts.ordinal,
       )
+      .map((entry) => entry.facts)
       .map((facts) =>
         timeline === "record-order"
           ? { ...facts, start: facts.ordinal, end: facts.ordinal }

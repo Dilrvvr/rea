@@ -1,4 +1,7 @@
-import { hasCompleteMethodRows } from "./managedMemberComparisonCoverage.js";
+import {
+  hasCompleteMethodRows,
+  type ManagedComparisonScope,
+} from "./managedMemberComparisonCoverage.js";
 import { digestCanonicalValue } from "../canonicalDigest.js";
 import {
   managedMemberInspectionSchema,
@@ -489,14 +492,6 @@ const groupBy = <Item>(
   return grouped;
 };
 
-/** Whether a side's inventory observed members of this declaring type. */
-const observedBy =
-  (side: ManagedMemberComparisonSide) =>
-  ({ declaring_type }: { readonly declaring_type: string | null }): boolean =>
-    side.result.selection === null ||
-    (declaring_type !== null &&
-      side.result.selection.type_names.includes(declaring_type));
-
 /**
  * Pair only members whose declaring type both sides observed. A member outside
  * the other side's selection stays one-sided, so a type selection never yields
@@ -536,18 +531,18 @@ const matchObserved = <Item extends Declared>(
 export const keyMembers = (
   observedLeft: ManagedMemberComparisonSide,
   observedRight: ManagedMemberComparisonSide,
+  scope: ManagedComparisonScope,
 ): {
   readonly methodMatches: ReturnType<typeof matchMethods>;
   readonly fieldMatches: ReturnType<typeof matchFields>;
 } => {
   const [left, right] = comparableSides(observedLeft, observedRight);
-  const sides = { inLeft: observedBy(left), inRight: observedBy(right) };
   const modern =
     left.result.nesting_read !== null && right.result.nesting_read !== null;
-  const declared = (inspection: ManagedMemberInspection): DeclaredNameOf => {
-    const names = new Map(
-      inspection.types.map((type) => [type.token, type.name_sha256]),
-    );
+  const declared = (
+    inspection: ManagedMemberInspection,
+    names: ReadonlyMap<string, string | null>,
+  ): DeclaredNameOf => {
     return (item) => {
       if (inspection.nesting_read === false) return null;
       const digest = names.get(item.declaring_type_token ?? "");
@@ -558,13 +553,13 @@ export const keyMembers = (
       return digest == null ? null : ["nominal-name-sha256", digest];
     };
   };
-  const declaredLeft = declared(left.result);
-  const declaredRight = declared(right.result);
+  const declaredLeft = declared(left.result, scope.left.names);
+  const declaredRight = declared(right.result, scope.right.names);
   return {
     methodMatches: matchObserved(
       left.result.methods,
       right.result.methods,
-      sides,
+      scope,
       (a, b) =>
         matchMethods(
           a,
@@ -580,7 +575,7 @@ export const keyMembers = (
     fieldMatches: matchObserved(
       left.result.fields,
       right.result.fields,
-      sides,
+      scope,
       (a, b) =>
         matchFields(
           a,

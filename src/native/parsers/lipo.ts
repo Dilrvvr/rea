@@ -1,4 +1,7 @@
 import { z } from "zod";
+import { AnalysisOutputError } from "../../domain/analysisErrorCore.js";
+import { err, ok, type Result } from "../../domain/result.js";
+import type { NativeCommandCapture } from "../CommandRunner.js";
 import { machoCpuSubtypeBase } from "../../domain/apple/machoCpuIdentity.js";
 
 const architectureSchema = z.object({
@@ -133,6 +136,48 @@ export const parseLipoOutput = (
     hiddenArchitectureCount,
     architectures,
   };
+};
+
+/** Classify expected lipo parse failures once for all command adapters. */
+export const parseLipoOutputResult = (
+  output: string,
+  operandPath?: string,
+): Result<LipoOutput, TypeError | z.ZodError> => {
+  try {
+    return ok(parseLipoOutput(output, operandPath));
+  } catch (cause: unknown) {
+    if (!(cause instanceof TypeError) && !(cause instanceof z.ZodError))
+      throw cause;
+    return err(cause);
+  }
+};
+
+/** Translate classified parse failure into native command output failure. */
+export const parseLipoCapture = (
+  capture: NativeCommandCapture,
+  operation: "inspect_macho" | "list_architectures",
+  operandPath: string,
+): Result<LipoOutput, AnalysisOutputError> => {
+  const parsed = parseLipoOutputResult(capture.stdout, operandPath);
+  if (parsed.ok) return parsed;
+  return err(
+    new AnalysisOutputError(
+      operation,
+      "lipo did not produce readable architecture records",
+      {
+        cause: parsed.error,
+        capturedOutput: {
+          stdout: capture.stdout,
+          stderr: capture.stderr,
+          truncated: false,
+          stdout_bytes: capture.stdoutBytes,
+          stderr_bytes: capture.stderrBytes,
+          exit_code: capture.exitCode,
+          signal: capture.signal,
+        },
+      },
+    ),
+  );
 };
 
 const integer = (value: string | undefined): number | null => {

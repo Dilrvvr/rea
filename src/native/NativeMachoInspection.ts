@@ -1,7 +1,10 @@
 import type { BinaryTarget } from "../domain/binaryTargetTypes.js";
 import type { EvidenceLocation } from "../domain/evidence.js";
 import type { AnalysisError } from "../domain/analysisErrorBase.js";
-import { AnalysisOutputError } from "../domain/analysisErrorCore.js";
+import {
+  AnalysisOutputError,
+  AnalysisUnsupportedTargetError,
+} from "../domain/analysisErrorCore.js";
 import {
   inspectMachoSchema,
   type NativeCommandInvocation,
@@ -14,7 +17,7 @@ import {
   selectMachoArchitectureName,
 } from "./MachoArchitectureSelection.js";
 import { parseDyldExports, parseDyldImports } from "./parsers/dyldInfo.js";
-import { parseLipoOutput, type LipoArchitecture } from "./parsers/lipo.js";
+import { parseLipoCapture, type LipoArchitecture } from "./parsers/lipo.js";
 import { withoutEchoedPathHeader } from "./parsers/echoedPath.js";
 import { parseOtoolLoadCommands } from "./parsers/otool.js";
 import { reconcileMachoUuid } from "./parsers/machoUuid.js";
@@ -22,6 +25,8 @@ import { compareUnicodeCodePoints } from "../domain/unicodeCodePointOrder.js";
 import {
   conflictingUuidCommandEvidence,
   isMissingUuidDyldFailure,
+  isUnbackedTextDyldFailure,
+  nativeMachoCapturedOutput,
   missingUuidLimitation,
   unusableNativeCommandOutput,
 } from "./NativeMachoCommandDiagnostics.js";
@@ -81,10 +86,13 @@ export const inspectNativeMacho = async (
   }
   const lipo = captures.find(({ tool }) => tool === "lipo");
   if (lipo === undefined) throw new TypeError("Missing lipo capture");
-  const { format, architectures } = parseLipoOutput(
-    lipo.stdout,
+  const parsedLipo = parseLipoCapture(
+    lipo,
+    "inspect_macho",
     context.target.path,
   );
+  if (!parsedLipo.ok) return parsedLipo;
+  const { format, architectures } = parsedLipo.value;
   const selection = selectArchitecture(context.target, architectures);
   if (selection.status === "absent")
     return err(
@@ -107,7 +115,11 @@ export const inspectNativeMacho = async (
         context.target.path,
       ],
       context.signal,
-      tool === "dyld_info" ? isMissingUuidDyldFailure : undefined,
+      tool === "dyld_info"
+        ? (capture) =>
+            isMissingUuidDyldFailure(capture) ||
+            isUnbackedTextDyldFailure(capture)
+        : undefined,
     );
   // vtool knows no variant subtypes, so no spelling selects an arm64e.x1 slice.
   const vtoolSelectsSlice =
@@ -126,7 +138,8 @@ export const inspectNativeMacho = async (
     if (!captured.ok) return err(captured.error);
     if (
       (captured.value.exitCode !== 0 || captured.value.signal !== null) &&
-      !isMissingUuidDyldFailure(captured.value)
+      !isMissingUuidDyldFailure(captured.value) &&
+      !isUnbackedTextDyldFailure(captured.value)
     )
       return err(unusableNativeCommandOutput(captured.value));
     captures.push(captured.value);
@@ -167,15 +180,24 @@ export const inspectNativeMacho = async (
         "Malformed otool load-command output",
         {
           cause,
-          capturedOutput: {
-            stdout: otool.stdout,
-            stderr: otool.stderr,
-            truncated: false,
-            stdout_bytes: otool.stdoutBytes,
-            stderr_bytes: otool.stderrBytes,
-            exit_code: otool.exitCode,
-            signal: otool.signal,
-          },
+          capturedOutput: nativeMachoCapturedOutput(otool),
+        },
+      ),
+    );
+  }
+  const unbackedTextFailure = captures.find(isUnbackedTextDyldFailure);
+  if (unbackedTextFailure !== undefined) {
+    if (!["10", "DSYM", "MH_DSYM"].includes(load.fileType ?? ""))
+      return err(unusableNativeCommandOutput(unbackedTextFailure));
+    return err(
+      new AnalysisUnsupportedTargetError(
+        "inspect_macho",
+        context.target.path,
+        "The selected Mach-O is a dSYM companion whose unbacked text sections are unsupported by dyld_info inspection",
+        {
+          capturedOutput: nativeMachoCapturedOutput(unbackedTextFailure),
+          remediationAction:
+            "Select the matching linked Mach-O executable for native inspection; this operation does not inspect dSYM companions with unbacked text sections.",
         },
       ),
     );

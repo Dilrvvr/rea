@@ -36,6 +36,30 @@ const stageHapEntries = [
   { path: "META-INF/FIXTURE.p7b", content: "opaque signing" },
 ] as const;
 
+it("retains inventoried certificate-block suffixes without claiming verified signatures", async () => {
+  const names = ["CERT.RSA", "CERT.DSA", "CERT.EC", "FIXTURE.p7b"];
+  const path = await writeApplicationZip(
+    "rea-harmony-certificate-paths-",
+    "Fixture.hap",
+    [
+      ...names.map((name) => ({
+        path: `META-INF/${name}`,
+        content: "opaque bytes",
+      })),
+      { path: "META-INF/MANIFEST.MF", content: "manifest" },
+      { path: "META-INF/CERT.SF", content: "signature file" },
+    ],
+  );
+  const graph = requireDeterministicProjection(
+    projectHarmonyApplicationEvidence,
+    await inventoryApplicationPackage(path),
+    harmonyApplicationProjectionResultSchema,
+  );
+  expect(graph.components.signing.map(({ path }) => path).sort()).toEqual(
+    names.map((name) => `META-INF/${name}`).sort(),
+  );
+});
+
 describe("HarmonyOS application projection", () => {
   it.each(["js", "mjs", "cjs", "jsx", "ts", "tsx", "mts", "cts"])(
     "retains the JavaScript runtime hint for an authenticated .%s component",

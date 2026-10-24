@@ -25,6 +25,7 @@ import type {
   ProviderProcessHandle,
   SpawnedOwnedProviderProcess,
 } from "../../../src/process/ProviderProcess.js";
+import { projectAnalysisError } from "../../../src/domain/analysisErrorProjection.js";
 import { stopOwnedDebuggerProcess } from "../../../src/process/ownedDebuggerSession.js";
 import { parseLinuxProcessStat } from "../../../src/process/LinuxProcessStat.js";
 import { expectGdbSessionStarted } from "./gdbTestHelpers.js";
@@ -134,6 +135,10 @@ it.each([
 
 it.each([
   ["show version", false],
+  ["show inferior-tty", false],
+  ["help inferior-tty", false],
+  ["show inferior-tty\nset inferior-tty /tmp/other", true],
+  ["help inferior-tty; run > /tmp/other", true],
   ["set pagination off", false],
   ["set inferior-t /tmp/output", true],
   ["inferior-tty /tmp/output", true],
@@ -1588,6 +1593,18 @@ it("rejects a pre-cancelled GDB start and an unconfigured executable", async () 
   if (!missing.ok) {
     expect(missing.error._tag).toBe("AnalysisCapabilityUnavailableError");
     expect(missing.error.message).toContain("does-not-exist-gdb");
+    expect(projectAnalysisError(missing.error)).toMatchObject({
+      code: "capability_unavailable",
+      message: expect.stringContaining("does-not-exist-gdb"),
+      remediation: { action: expect.stringContaining("REA_GDB_COMMAND") },
+      details: {
+        diagnostics: {
+          boundary: "provider-launch",
+          command: join(tmpdir(), "does-not-exist-gdb"),
+          system_code: "ENOENT",
+        },
+      },
+    });
   }
 });
 
@@ -2228,6 +2245,60 @@ it("retains a multi-run console command through its completion query before disp
   });
 });
 
+it.each([
+  "abc",
+  "abc123",
+  "é🚀",
+  "999999^done",
+  '~"raw stream-looking output"',
+])(
+  "completes raw unterminated shell output without guessing its MI suffix: %s",
+  async (payload) => {
+    let originalToken = "";
+    let queryCount = 0;
+    const fake = createFakeSpawner((child, token, command) => {
+      if (command.includes("shell printf fixture")) {
+        originalToken = token;
+        const bytes = Buffer.from(`${payload}${token}^done\n(gdb) \n`);
+        child.stdout.write(bytes.subarray(0, 1));
+        child.stdout.write(bytes.subarray(1));
+      } else if (command === "-gdb-show mi-async") {
+        queryCount += 1;
+        child.stdout.write(`${token}^done,value="off"\n(gdb) \n`);
+      } else
+        child.stdout.write(
+          command.includes("list-thread-groups")
+            ? `${token}^done,groups=[]\n`
+            : `${token}^done\n`,
+        );
+    });
+    const manager = managerWithFakeSpawner(fake.spawnProcess);
+    const started = await expectGdbSessionStarted(manager);
+    const executed = await manager.execute(
+      started.value.session_id,
+      "shell printf fixture",
+    );
+    if (!executed.ok) throw executed.error;
+    expect(executed.value.result).toMatchObject({
+      mi: "",
+      records: expect.arrayContaining([`${payload}${originalToken}^done`]),
+      completion_status: "complete",
+      output_truncated: false,
+    });
+    expect(queryCount).toBe(1);
+    expect(executed.value.evidence.limitations.join(" ")).toContain(
+      "result class is unknown",
+    );
+    const following = await manager.execute(
+      started.value.session_id,
+      "show version",
+    );
+    expect(following.ok).toBe(true);
+    expect(queryCount).toBe(1);
+    expect((await manager.close(started.value.session_id)).ok).toBe(true);
+  },
+);
+
 it("retains unknown completion and partial Evidence when the completion query fails", async () => {
   const fake = createFakeSpawner((child, token, command) => {
     if (command.includes("source commands.gdb"))
@@ -2612,6 +2683,14 @@ it("revokes the verified sink after an abbreviated with inferior-tty run command
     inferiorTty: tty,
   });
 
+  for (const inspection of ["show inferior-tty", "help inferior-tty"]) {
+    expect(
+      (await manager.execute(started.value.session_id, inspection)).ok,
+    ).toBe(true);
+    expect(
+      manager.status(started.value.session_id)?.inferior_tty_verified,
+    ).toBe(true);
+  }
   const overridden = await manager.execute(
     started.value.session_id,
     "with inferior-t /tmp/other-output -- run",

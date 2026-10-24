@@ -13,6 +13,7 @@ import {
   artifactEdgeId,
   artifactIdForContent,
   occurrenceIdForLocation,
+  logicalPathNfc,
 } from "../../domain/artifactIdentity.js";
 import type { ArtifactEntry } from "../ArtifactReader.js";
 import type {
@@ -47,8 +48,10 @@ export interface MutableOccurrence {
   compressed_size: number | null;
   executable: boolean;
   encrypted: boolean;
+  unpacked?: true;
   hash_status: ArtifactOccurrence["hash_status"];
   source_location: ArtifactOccurrence["source_location"];
+  source_path?: string;
   declared_integrity?: NonNullable<ArtifactOccurrence["declared_integrity"]>;
   format_metadata?: NonNullable<ArtifactOccurrence["format_metadata"]>;
   limitations: string[];
@@ -103,6 +106,10 @@ export const createOccurrence = (
     artifact_id: null,
     parent_occurrence_id: parent,
     logical_path: path,
+    ...(entry.sourcePath !== undefined ||
+    entry.path !== logicalPathNfc(entry.path)
+      ? { source_path: entry.sourcePath ?? entry.path }
+      : {}),
     entry_kind: entry.kind,
     artifact_kind: role.kind,
     artifact_format: role.format,
@@ -110,6 +117,7 @@ export const createOccurrence = (
     compressed_size: entry.compressedSize,
     executable: entry.executable,
     encrypted: entry.encrypted,
+    ...(entry.unpacked ? { unpacked: true as const } : {}),
     hash_status: entry.encrypted ? "unavailable" : "not-hashed",
     source_location:
       entry.encrypted ||
@@ -326,7 +334,9 @@ export const createArtifactEdges = (
     const sourceCandidates =
       sourcePath === undefined ? [] : (byPath.get(sourcePath) ?? []);
     const mappedSource =
-      sourceCandidates.length === 1 && sourceCandidates[0]?.artifact_id !== null
+      sourceCandidates.length === 1 &&
+      sourceCandidates[0]?.entry_kind === "file" &&
+      sourceCandidates[0].artifact_id !== null
         ? sourceCandidates[0]
         : undefined;
     if (sourcePath !== undefined) {
@@ -336,7 +346,9 @@ export const createArtifactEdges = (
               occurrence: `Source-map target is unknown because multiple occurrences share ${JSON.stringify(sourcePath)}.`,
               coverage: `Source-map relationships are unknown because multiple occurrences share ${JSON.stringify(sourcePath)}.`,
             }
-          : sourceCandidates.length === 1 && mappedSource === undefined
+          : sourceCandidates.length === 1 &&
+              sourceCandidates[0]?.entry_kind === "file" &&
+              mappedSource === undefined
             ? {
                 occurrence: `Source-map target identity is unknown because the matching occurrence at ${JSON.stringify(sourcePath)} has no content identity.`,
                 coverage: `Source-map relationships are unknown because the matching occurrence at ${JSON.stringify(sourcePath)} has no content identity.`,

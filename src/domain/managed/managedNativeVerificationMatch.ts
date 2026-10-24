@@ -252,11 +252,28 @@ const candidateNames = (
     PinvokeImport,
     "import_name" | "char_set" | "call_convention" | "no_mangle"
   >,
+  nativeFormat: string | null,
 ): readonly string[] => {
+  if (managed.import_name.length === 0) return [];
   const names = new Set<string>([managed.import_name]);
-  if (!managed.no_mangle) {
-    if (managed.char_set === "unicode") names.add(`${managed.import_name}W`);
-    if (managed.char_set === "ansi") names.add(`${managed.import_name}A`);
+  // Unix P/Invoke lookup uses the declared entry point directly, regardless of
+  // marshalling charset or calling convention. Keep Windows decorations local
+  // to PE or an unresolved native platform; metadata flags remain unchanged.
+  if (
+    !managed.no_mangle &&
+    nativeFormat !== "elf" &&
+    nativeFormat !== "mach-o"
+  ) {
+    if (
+      managed.char_set === "unicode" ||
+      (nativeFormat === "pe" && managed.char_set === "auto")
+    )
+      names.add(`${managed.import_name}W`);
+    if (
+      managed.char_set === "ansi" ||
+      (nativeFormat === "pe" && managed.char_set === "not-specified")
+    )
+      names.add(`${managed.import_name}A`);
     if (managed.call_convention === "stdcall") {
       names.add(`_${managed.import_name}`);
       names.add(`_${managed.import_name}@0`);
@@ -281,15 +298,33 @@ interface PinvokeCandidateMatch {
   readonly match: PinvokeMatch;
 }
 
+const pinvokeCandidates = (
+  managed: PinvokeImport,
+  symbols: readonly NativeSymbol[],
+  moduleFormatsByEvidenceId: ReadonlyMap<string, string | null>,
+): readonly NativeSymbol[] => {
+  const namesByFormat = new Map<string | null, readonly string[]>();
+  return symbols.filter((symbol) => {
+    const format = moduleFormatsByEvidenceId.get(symbol.evidence_id) ?? null;
+    let names = namesByFormat.get(format);
+    if (names === undefined) {
+      names = candidateNames(managed, format);
+      namesByFormat.set(format, names);
+    }
+    return names.some((name) => sameSymbolName(name, symbol));
+  });
+};
+
 const matchPinvoke = (
   managed: PinvokeImport,
   symbols: readonly NativeSymbol[],
   supportedNativeEvidence: number,
   moduleFormatsByEvidenceId: ReadonlyMap<string, string | null>,
 ): PinvokeCandidateMatch => {
-  const names = candidateNames(managed);
-  const allCandidates = symbols.filter((symbol) =>
-    names.some((name) => sameSymbolName(name, symbol)),
+  const allCandidates = pinvokeCandidates(
+    managed,
+    symbols,
+    moduleFormatsByEvidenceId,
   );
   const [first, ...remaining] = allCandidates;
   if (first === undefined)
@@ -514,7 +549,8 @@ export const buildVerificationResult = ({
 > => {
   const counts = countStatuses(pinvokeImports);
   const nativeBodyUnresolved = managed.native_implementations.filter(
-    ({ boundary_kind: kind }) => kind !== "pinvoke",
+    ({ boundary_kind: kind }) =>
+      kind !== "pinvoke" && kind !== "runtime-provided",
   ).length;
   const coverage: ManagedNativeVerificationResult["coverage"] = {
     status:
@@ -550,6 +586,9 @@ export const buildVerificationResult = ({
     },
     pinvoke_imports: [...pinvokeImports],
     native_implementations: {
+      runtime_provided: managed.native_implementations.filter(
+        ({ boundary_kind }) => boundary_kind === "runtime-provided",
+      ).length,
       unresolved: nativeBodyUnresolved,
       reason:
         "Managed metadata tokens and RVAs are not translated to native provider addresses by this workflow; C++/CLI, ReadyToRun, and native-body mappings require explicit provider-supported bridge evidence.",

@@ -15,6 +15,7 @@ import type { CdpEndpointDiscovery, CdpEndpointTarget } from "./CdpEndpoint.js";
 import type { CdpConnection, CdpEvent } from "./CdpConnection.js";
 import { CdpCaptureCompleteness } from "./CdpCaptureCompleteness.js";
 import { BrowserObservationError } from "../domain/browserObservationError.js";
+import { cdpOriginScopeRefusal } from "./CdpOriginScopeError.js";
 import {
   allowedSanitizedUrl,
   delayWithCancellation,
@@ -77,6 +78,16 @@ export const discoverWebMcp = async (
     resolvedTransientFrames: new Set<string>(),
   };
   ingestInitialFrameTree(frameTree, frameScope);
+  if (
+    [...frameUrls.values()].some(
+      (frame) => frame.parentFrameId !== null && frame.origin !== null,
+    )
+  ) {
+    completeness.attachLimited("webmcp_tools");
+    limitations.push(
+      "WebMCP.enable replay does not establish coverage of pre-existing subframe registrations. Later live registrations are retained, but cannot recover descriptors omitted before attachment.",
+    );
+  }
   const removeListener = context.connection.onEvent((event) => {
     if (event.sessionId !== context.sessionId) return;
     if (ingestFrameScopeEvent(event, frameScope)) return;
@@ -367,7 +378,7 @@ const requiredDiscoveryFrameUrl = (
   const observed = observeMainFrameUrl(result);
   const facts = classifyCdpFrameUrl(observed, origins);
   if (facts.scope === "outside_policy" || facts.scope === "unsupported")
-    throw new BrowserObservationError("inspect_web_page", "target_not_allowed");
+    throw cdpOriginScopeRefusal("discover_webmcp_tools");
   if (observed.kind !== "observed")
     throw new BrowserObservationError("inspect_web_page", "protocol_error");
   if (facts.url === undefined)
@@ -494,10 +505,12 @@ const normalizeTool = (
     (annotations !== undefined &&
       Object.hasOwn(annotations, "consequential") &&
       typeof annotations.consequential !== "boolean");
-  const declaration = jsonValueSchema.safeParse(value.inputSchema);
-  if (!declaration.success)
+  const declaration = Object.hasOwn(value, "inputSchema")
+    ? jsonValueSchema.safeParse(value.inputSchema)
+    : undefined;
+  if (declaration?.success === false)
     completeness.exclude("webmcp_tools", "invalid_protocol_value");
-  const schema = declaration.success ? declaration.data : null;
+  const schema = declaration?.success === true ? declaration.data : null;
   const registrationFrame = topCallFrame(value.stackTrace);
   if (!registrationFrame.ok)
     completeness.exclude("webmcp_tools", "invalid_protocol_value");
@@ -513,9 +526,8 @@ const normalizeTool = (
         ? "imperative"
         : "declarative",
     input_schema: schema,
-    input_schema_sha256: declaration.success
-      ? digestCanonicalValue(schema)
-      : null,
+    input_schema_sha256:
+      declaration?.success === true ? digestCanonicalValue(schema) : null,
     annotations: {
       read_only: annotation("readOnly"),
       untrusted_content: annotation("untrustedContent"),

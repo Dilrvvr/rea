@@ -390,19 +390,30 @@ describe("ELF export version and name coverage", () => {
     expect(result.coverage.status).toBe("partial");
   });
 
-  it("separates no dynamic symbols from unread section headers", () => {
+  it("separates an examined empty symbol table from unavailable symbol declarations", () => {
+    expect(parse(elfExportImage({ symbols: [] }))).toMatchObject({
+      exports: [],
+      coverage: { status: "complete" },
+    });
     expect(
       parse(elfExportImage({ symbols: [], dynamicSymbols: false })),
     ).toMatchObject({ exports: [], coverage: { status: "complete" } });
-    expect(
-      parse(elfExportImage({ symbols: [], sectionHeaders: false })),
-    ).toMatchObject({
-      exports: [],
-      coverage: {
-        status: "unsupported",
-        reason: expect.stringContaining("no section headers"),
-      },
-    });
+    for (const bytes of [
+      elfExportImage({ symbols: [], sectionHeaders: false }),
+      elfExportImage({
+        symbols: [],
+        dynamicSymbols: false,
+        dynamicSegment: true,
+      }),
+    ])
+      expect(parse(bytes)).toMatchObject({
+        exports: [],
+        coverage: {
+          status: "unsupported",
+          reason: expect.stringContaining("dynamic segment"),
+          examined_entries: 0,
+        },
+      });
   });
 });
 

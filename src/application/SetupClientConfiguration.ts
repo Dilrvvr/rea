@@ -1,6 +1,8 @@
 import { readClientPolicyBlock } from "./GeminiClientSettings.js";
 import {
   readClientConfigurationFiles,
+  clientConfigurationForWrite,
+  clientWriteDialect,
   effectiveClientConfiguration,
   readConfigurationText,
   type ClientConfigurationSource,
@@ -9,6 +11,7 @@ import { err, ok, type Result } from "../domain/result.js";
 import { ConfigurationError } from "../domain/configurationErrors.js";
 import {
   clientConfigurationValuesEqual,
+  effectiveClientServer,
   clientServerListedDisabled,
   clientServerPath,
   legacyClientServerPath,
@@ -25,7 +28,10 @@ import { dirname } from "node:path";
 import { RegularFileChangedError } from "../filesystem/RegularFile.js";
 import { withClientConfigurationTransaction } from "./ClientConfigurationTransaction.js";
 import { isClientConfigurationCleanupFailure } from "./ClientConfigurationCleanup.js";
-import { ClientConfigurationPublication } from "./ClientConfigurationPublication.js";
+import {
+  ClientConfigurationPublication,
+  ClientConfigurationWriteError,
+} from "./ClientConfigurationPublication.js";
 import {
   clientRegistrationEnvironment,
   clientRegistrationEnvironmentDetailsWithBudget,
@@ -68,17 +74,13 @@ export class ClientConfigurationCleanupRollbackFailure extends RegularFileCleanu
       { readonly status: "failed" }
     >,
   ) {
-    super(
-      failure.path,
-      failure.owner,
-      failure.outcome,
-      new AggregateError(
+    super({
+      ...failure,
+      cleanupCause: new AggregateError(
         [failure.cleanupCause, configurationFailure],
         `Configuration readback cleanup and rollback failed: ${failure.path}`,
       ),
-      failure.retention,
-      failure.completionCancellation,
-    );
+    });
   }
 }
 
@@ -138,24 +140,8 @@ const configureClientDocument = async (
       : undefined;
   if (editabilityError !== undefined)
     return { status: "failed", reason: "readback" };
-  const policy = await readClientPolicyBlock(
-    client,
-    existing,
-    await clientConfigurationDesired(
-      client,
-      environment,
-      command,
-      existing,
-      files.value,
-      resolveProviderRequestBudget,
-    ),
-  );
-  if (!policy.ok) {
-    throwCleanupFailure(policy.error);
-    return { status: "failed", reason: "readback" };
-  }
-  if (policy.value !== undefined)
-    return { status: "failed", reason: "readback" };
+  // Policy admission belongs to the transaction snapshot below, not the
+  // earlier layered discovery document.
   let snapshot:
     | Awaited<ReturnType<typeof readRegularFileTextSnapshot>>
     | undefined;
@@ -177,6 +163,7 @@ const configureClientDocument = async (
           : "{}"),
       format,
     );
+    parsed = clientConfigurationForWrite(parsed, files.value);
     const policy = await readClientPolicyBlock(
       client,
       parsed,
@@ -324,8 +311,15 @@ const persistClientConfiguration = async ({
     );
   } catch (cause: unknown) {
     // An unserializable edit is reported before any file is written.
-    void cause;
-    return { status: "failed", reason: "write" };
+    return {
+      status: "failed",
+      reason: "write",
+      failure: new ClientConfigurationWriteError(
+        client.configPath,
+        "serialize",
+        cause,
+      ).problem,
+    };
   }
   if (!serialized.ok)
     return {
@@ -357,9 +351,17 @@ const persistClientConfiguration = async ({
     if (isClientConfigurationCleanupFailure(cause)) throw cause;
     if (isConfigurationConflict(cause))
       return conflictFailure(recoveryBackupPath);
-    // Write failure is reported by the status reason.
-    void cause;
-    return { status: "failed", reason: "write" };
+    return {
+      status: "failed",
+      reason: "write",
+      failure: (cause instanceof ClientConfigurationWriteError
+        ? cause
+        : new ClientConfigurationWriteError(client.configPath, "publish", cause)
+      ).problem,
+      ...(recoveryBackupPath === undefined
+        ? {}
+        : { backupPath: recoveryBackupPath }),
+    };
   }
   return publication.verify(async () => {
     try {
@@ -424,7 +426,10 @@ export const clientConfigurationAligned = async (
       return false;
     }
     const original = await readRegularFileText(client.configPath);
-    const parsed = parseClientConfiguration(original, client.format);
+    const parsed = clientConfigurationForWrite(
+      parseClientConfiguration(original, client.format),
+      files.value,
+    );
     const desired = await clientConfigurationDesired(
       client,
       providerEnvironment,
@@ -507,27 +512,6 @@ const inspectClientDocument = async (
       status: "invalid",
       remediation: editabilityError.message,
     };
-  const policy = await readClientPolicyBlock(
-    client,
-    existing,
-    await clientConfigurationDesired(
-      client,
-      providerEnvironment,
-      command,
-      existing,
-      files.value,
-      resolveProviderRequestBudget,
-    ),
-  );
-  if (!policy.ok) {
-    throwCleanupFailure(policy.error);
-    return {
-      status: "invalid",
-      remediation: policy.error.detail,
-    };
-  }
-  if (policy.value !== undefined)
-    return { status: "invalid", remediation: policy.value };
   const transactionPath = await resolveClientConfigTransactionPath(
     client.configPath,
   );
@@ -543,6 +527,28 @@ const inspectClientDocument = async (
   } catch (cause: unknown) {
     if (cause instanceof RegularFileCleanupFailure) throw cause;
     if (isMissing(cause)) {
+      // This read establishes absence; do not reuse an earlier user-file policy.
+      const policy = await readClientPolicyBlock(
+        client,
+        undefined,
+        await clientConfigurationDesired(
+          client,
+          providerEnvironment,
+          command,
+          undefined,
+          files.value,
+          resolveProviderRequestBudget,
+        ),
+      );
+      if (!policy.ok) {
+        throwCleanupFailure(policy.error);
+        return {
+          status: "invalid",
+          remediation: policy.error.detail,
+        };
+      }
+      if (policy.value !== undefined)
+        return { status: "invalid", remediation: policy.value };
       const fallback = await readZcodeFallbackServers(client);
       if (!fallback.ok) {
         throwCleanupFailure(fallback.error);
@@ -556,7 +562,10 @@ const inspectClientDocument = async (
     };
   }
   try {
-    const parsed = parseClientConfiguration(original, client.format);
+    const parsed = clientConfigurationForWrite(
+      parseClientConfiguration(original, client.format),
+      files.value,
+    );
     const desired = await clientConfigurationDesired(
       client,
       providerEnvironment,
@@ -583,9 +592,11 @@ const inspectClientDocument = async (
       return { status: "invalid", remediation: fallback.error.detail };
     }
   } catch (cause: unknown) {
-    if (cause instanceof RegularFileCleanupFailure) throw cause;
-    if (cause instanceof ConfigurationError)
-      return { status: "invalid", remediation: cause.message };
+    if (
+      cause instanceof RegularFileCleanupFailure ||
+      cause instanceof ConfigurationError
+    )
+      throw cause;
     // Malformed configuration is reported with the invalid remediation.
     void cause;
     return {
@@ -752,7 +763,10 @@ const clientConfigurationDesired = async (
     client,
     document: parsed,
   });
-  const format = parsed?.dialect ?? client.format ?? "json";
+  const format = clientWriteDialect(
+    parsed?.dialect ?? client.format ?? "json",
+    sources,
+  );
   const launcher =
     command.length === 0 ? [PRODUCT_IDENTITY.cliBinary, "mcp"] : command;
   if (format === "dsh") {
@@ -801,7 +815,9 @@ const clientConfigurationDesired = async (
     format,
     launcher,
     registrationEnvironment,
-    parsed?.servers[PRODUCT_IDENTITY.mcpServerKey],
+    parsed === undefined
+      ? undefined
+      : effectiveClientServer(parsed, PRODUCT_IDENTITY.mcpServerKey),
     validated.value.timeoutInputs,
   );
   if (!registration.ok) throw registration.error;
