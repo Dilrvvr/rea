@@ -262,6 +262,9 @@ export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
   inspect_native_exports: evidence,
   inspect_elf_notes: evidence,
   inspect_apple_ips: evidence,
+  inspect_devicetree: evidence,
+  inspect_kernel_module: evidence,
+  inspect_pe_load_config: evidence,
   inspect_analysis_view: evidence,
   inspect_firmware_regions: effects({
     mutatesSession: true,
@@ -678,6 +681,10 @@ export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
   inspect_electron_fuses: evidence,
   export_web_scripts: effects({
     mutatesSession: true,
+    writesFilesystem: true,
+    idempotent: false,
+  }),
+  export_environment_bundle: effects({
     writesFilesystem: true,
     idempotent: false,
   }),

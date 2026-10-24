@@ -1,8 +1,8 @@
 ---
 name: reverse-engineer-anything
-description: Reverse engineer native, managed, Electron/JavaScript, packaged, firmware, and browser targets with REA. Use shipped-artifact or requested runtime evidence to explain features, compare versions, decompile code, or guide a reconstruction. Skip REA for ordinary source-repository architecture analysis.
+description: Reverse engineer native, managed, Electron/JavaScript, packaged, firmware, and browser targets with REA, and build agent environments (AgentEnv bundles) of web applications from a live instance or a capture. Use shipped-artifact or requested runtime evidence to explain features, compare versions, decompile code, or guide a reconstruction. Skip REA for ordinary source-repository architecture analysis.
 metadata:
-  version: "46"
+  version: "49"
 ---
 
 # REA
@@ -133,6 +133,9 @@ explicit path or endpoint and do not need it.
   `capture_browser_scenario` with declared actions. See
   [runtime observation](references/runtime-observation.md) for connect/launch
   and the focused follow-up browser tools.
+- Agent environment (AgentEnv bundle) of a web application: read
+  [environments](references/environments.md) before recording; it records with
+  `capture_browser_scenario` and writes the bundle with `export_environment_bundle`.
 - Fiddler Everywhere traffic or a native `.saz` capture: read the
   [Fiddler workflow](references/runtime-observation.md#fiddler-everywhere-traffic-debugging).
   Inspect saved SAZ with `inspect_web_network_capture` and `format: "saz"`;
@@ -259,6 +262,14 @@ explicit path or endpoint and do not need it.
   proof the image never imported APIs through another table. Bound snapshots
   and loaded IAT contents remain unobserved. See the
   [PE import guide](https://github.com/morluto/rea/blob/main/docs/pe-imports.md).
+- PE TLS callbacks and load configuration: `inspect_pe_load_config` with the
+  explicit local PE32/PE32+ file. This built-in target-free inspection requires
+  no Windows SDK. Preserve callback VAs as strings with their RVA, file offset
+  and section, and the size-covered security cookie, SafeSEH, CFG,
+  EH-continuation and XFG fields. Guard-flag mitigation claims are inferred
+  linker declarations, not proof of enforcement. A missing directory is observed
+  absence of that declaration. See the
+  [PE load configuration guide](https://github.com/morluto/rea/blob/main/docs/pe-load-config.md).
 - ELF note tables: `inspect_elf_notes` with the explicit local ELF32/ELF64
   file. This built-in target-free inspection requires no disassembler. Preserve
   PT_NOTE and SHT_NOTE ranges, owners, types, descriptor SHA-256, and GNU
@@ -273,6 +284,16 @@ explicit path or endpoint and do not need it.
   body; other types, including `"288"` stackshots, return no crash result.
   Opened Mach-O and dSYM UUID joins remain unobserved. See the
   [Apple IPS guide](https://github.com/morluto/rea/blob/main/docs/apple-ips.md).
+- Linux kernel module metadata: `inspect_kernel_module` with the explicit local
+  ELF32/ELF64 relocatable file. This built-in target-free inspection requires
+  no Linux host or `modinfo`. Preserve `.modinfo` key order and duplicate keys,
+  `__versions` CRC hex, section file ranges, and the appended signature
+  trailer's PKCS#7 SHA-256. A missing section is observed absence when section
+  names are known, not proof the module never carried that metadata.
+  `struct module` is not decoded. The signature is not validated. gzip, xz, and
+  zstd containers are unsupported; decompress into a separate file with an
+  external codec utility, then inspect the decompressed `ET_REL` image. See the
+  [kernel module guide](https://github.com/morluto/rea/blob/main/docs/kernel-modules.md).
 - CPython 3.7–3.13 `.pyc` header, nested marshal code objects and bytecode
   identity: `inspect_python_pyc` with the explicit local file. This built-in
   target-free inspection requires no Python installation. Preserve magic,
@@ -471,6 +492,9 @@ as complete while required questions remain open.
   [references/runtime-observation.md](references/runtime-observation.md)
 - Evidence paging, comparisons, residual unknowns, and verification:
   [references/evidence-workflows.md](references/evidence-workflows.md)
+- Agent environments (AgentEnv bundles) of a web application, recorded from
+  a live instance or a HAR:
+  [references/environments.md](references/environments.md)
 
 ## Finish the task
 

@@ -36,10 +36,8 @@ import { silentLogger } from "../../../src/logger.js";
 import { createServer } from "../../../src/server/createServer.js";
 import { EvidenceMcpServer } from "../../../src/server/EvidenceMcpServer.js";
 import { registerFridaTools } from "../../../src/server/registerFridaTools.js";
-import {
-  createToolResultDelivery,
-  ToolResultDelivery,
-} from "../../../src/server/toolResult.js";
+import { ToolResultDelivery } from "../../../src/server/ToolResultDelivery.js";
+import { createToolResultDelivery } from "../../../src/server/toolResult.js";
 import { createTestBinarySession } from "../../fixtures/binarySession.js";
 import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 
@@ -384,7 +382,7 @@ it.each([
     );
     const partial = vi.spyOn(
       ToolResultDelivery.prototype,
-      "toRecordedPartialErrorToolResult",
+      "toPartialErrorToolResult",
     );
     onTestFinished(() => {
       loadSpy.mockRestore();
@@ -526,7 +524,7 @@ it("preserves the native resume failure after MCP cancellation reaches the serve
     fixture.controls.resume = async () => {};
     throw new Error("native resume rejected");
   };
-  const delivery = vi.spyOn(ToolResultDelivery.prototype, "toCallToolResult");
+  const delivery = vi.spyOn(ToolResultDelivery.prototype, "toErrorToolResult");
   onTestFinished(() => delivery.mockRestore());
   let serverSignal: AbortSignal | undefined;
   const resume = fixture.manager.resumeSession.bind(fixture.manager);
@@ -562,12 +560,9 @@ it("preserves the native resume failure after MCP cancellation reaches the serve
   await pending;
   await vi.waitFor(() => expect(delivery).toHaveBeenCalledOnce());
   expect(delivery.mock.calls[0]?.[0]).toMatchObject({
-    ok: false,
-    error: {
-      _tag: "AnalysisCapabilityUnavailableError",
-      operation: "resume_frida_session",
-      message: expect.stringContaining("native resume rejected"),
-    },
+    _tag: "AnalysisCapabilityUnavailableError",
+    operation: "resume_frida_session",
+    message: expect.stringContaining("native resume rejected"),
   });
   expect(fixture.controls.detachCalls).toBe(1);
   expect(fixture.unloaded).toEqual(["resume-failure"]);
