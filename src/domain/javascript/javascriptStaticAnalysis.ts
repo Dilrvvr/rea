@@ -17,7 +17,10 @@ import {
 import { isElectronRendererLoad } from "./electronStaticRenderer.js";
 import { finishElectronNativeBindingsSteps } from "./electronStaticAnalysisNative.js";
 import { inspectElectronStaticNode } from "./electronStaticAnalysis.js";
-import { hasPossibleCommonJsDelegateWrite } from "./javascriptSemanticRequireOrigin.js";
+import {
+  hasPossibleCommonJsDelegateWrite,
+  semanticFactoryLoaderMemberAt,
+} from "./javascriptSemanticRequireOrigin.js";
 import { semanticResourceLimitReason } from "./javascriptSemanticResourceLimits.js";
 import { createStaticPathIntrinsicQuery } from "./javascriptStaticPathIntrinsics.js";
 import { createSemanticExpressionShapeResolver } from "./javascriptSemanticExpressionShapes.js";
@@ -41,6 +44,7 @@ import {
   indexVitePreloadDependencyTable,
 } from "./javascriptStaticAnalysisCalls.js";
 import {
+  finishBundlerExports,
   inspectBundlerRegistration,
   inspectBundlerBootstrap,
   inspectEsbuildWrapper,
@@ -109,7 +113,10 @@ export function* analyzeParsedJavaScriptStaticSourceSteps(
       isElectronRendererLoad(callee, site, findings, index),
     source,
     accumulator,
-    vitePreloadDependencyTable: indexVitePreloadDependencyTable(file.program),
+    vitePreloadDependencyTable: indexVitePreloadDependencyTable(
+      file.program,
+      bindings.erasedSyntaxNodes,
+    ),
     openReceiverFacts: receivers.openReceivers,
     electronBindings: electronIdentity.bindings,
     electronExportIntact: electronIdentity.intactExport,
@@ -125,6 +132,9 @@ export function* analyzeParsedJavaScriptStaticSourceSteps(
   );
   yield* traverseStaticSourceSteps(file, findings, bindings, routeScan);
   const routes = yield* routeScan.finishSteps();
+  if (accumulator.bundlerExportHelpersObserved)
+    yield* index.indexMemberMutationFactsSteps();
+  finishBundlerExports(accumulator, index);
   yield* finishElectronNativeBindingsSteps(findings, index);
   yield* finishElectronBrowserWindowsSteps(findings, index);
   if (accumulator.pendingModuleRequireCalls.length > 0) {
@@ -160,7 +170,8 @@ function* traverseStaticSourceSteps(
     enter: (node, parent) => {
       findings.accumulator.visitedNodes += 1;
       routeScan.inspect(node, parent);
-      inspectNode(node, findings, bindings);
+      if (!bindings.erasedSyntaxNodes.has(node))
+        inspectNode(node, findings, bindings);
       return undefined;
     },
   });
@@ -299,6 +310,15 @@ const inspectNode = (
     inspectBundlerBootstrap(source, node, accumulator, bindings);
     inspectBundlerRegistration(source, node, accumulator, bindings);
     inspectEsbuildWrapper(source, node, accumulator, bindings);
+    if (
+      semanticFactoryLoaderMemberAt(
+        node,
+        bindings,
+        accumulator.factoryRequireBindingIds,
+        "d",
+      ) === "factory-loader"
+    )
+      accumulator.bundlerExportHelpersObserved = true;
     inspectCall(source, node, findings, bindings);
   } else if (t.isOptionalCallExpression(node)) {
     inspectCall(source, node, findings, bindings);

@@ -251,12 +251,28 @@ explicit path or endpoint and do not need it.
   absence of that table, not proof the image is unsigned in every catalog sense.
   Signatures are not verified. See the
   [PE certificate guide](https://github.com/morluto/rea/blob/main/docs/pe-certificates.md).
+- PE import and delay-load tables: `inspect_pe_imports` with the explicit
+  local PE32/PE32+ file. This built-in target-free inspection requires no
+  Windows SDK. Preserve DLL names, named and ordinal functions, ILT/IAT RVAs,
+  delay-load descriptors, and the pefile import hash of the standard import
+  table. A missing import directory is observed absence of that table, not
+  proof the image never imported APIs through another table. Bound snapshots
+  and loaded IAT contents remain unobserved. See the
+  [PE import guide](https://github.com/morluto/rea/blob/main/docs/pe-imports.md).
 - ELF note tables: `inspect_elf_notes` with the explicit local ELF32/ELF64
   file. This built-in target-free inspection requires no disassembler. Preserve
   PT_NOTE and SHT_NOTE ranges, owners, types, descriptor SHA-256, and GNU
   build-id or ABI-tag fields. A missing table is observed absence of those
   declarations, not proof the image never carried notes. See the
   [ELF notes guide](https://github.com/morluto/rea/blob/main/docs/elf-notes.md).
+- Apple `.ips` crash reports: `inspect_apple_ips` with the explicit local
+  file. This built-in target-free inspection requires no Xcode, atos, or
+  pwntools. Preserve first-line metadata, `bug_type` as a string, process and
+  exception facts, lossless integer registers, usedImages UUIDs, and
+  documented classification matches. Only `bug_type` `"309"` yields a crash
+  body; other types, including `"288"` stackshots, return no crash result.
+  Opened Mach-O and dSYM UUID joins remain unobserved. See the
+  [Apple IPS guide](https://github.com/morluto/rea/blob/main/docs/apple-ips.md).
 - CPython 3.7–3.13 `.pyc` header, nested marshal code objects and bytecode
   identity: `inspect_python_pyc` with the explicit local file. This built-in
   target-free inspection requires no Python installation. Preserve magic,
@@ -267,8 +283,10 @@ explicit path or endpoint and do not need it.
 - Erlang BEAM IFF container: `inspect_erlang_beam` with the explicit local
   `.beam` file. This built-in target-free inspection requires no Erlang
   installation. Preserve chunk names, atom order, export/import/lambda tables,
-  and the Code header. Missing optional tables stay null. Bytecode is not
-  executed. See the
+  and the Code header. For selected facts, prefer `detail: "summary"` plus a
+  `beam` view (collection, names/indices, fields and paging), retaining the full
+  Evidence. CLI summary requires `--evidence_output`. Missing table counts stay
+  null; decoded empty tables count zero. Bytecode is not executed. See the
   [Erlang BEAM guide](https://github.com/morluto/rea/blob/main/docs/erlang-beam.md).
 
 - Explicit local SQLite database snapshot: `inspect_sqlite_database`. Inspect

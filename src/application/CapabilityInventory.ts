@@ -450,6 +450,7 @@ const workflowAvailabilityFor = ({
     name === "inspect_gpu_code_objects" ||
     name === "inspect_rust_binary" ||
     name === "inspect_python_pyc" ||
+    name === "inspect_apple_ips" ||
     name === "inspect_erlang_beam" ||
     name === "inspect_electron_fuses"
   )
@@ -529,7 +530,7 @@ const workflowAvailabilityFor = ({
         };
   if (name === "inspect_pe_resources" || name === "inspect_native_exports")
     return { reason: "available", remediation: null };
-  if (name === "inspect_pe_certificates")
+  if (name === "inspect_pe_certificates" || name === "inspect_pe_imports")
     return { reason: "available", remediation: null };
   if (name === "inspect_elf_notes")
     return { reason: "available", remediation: null };

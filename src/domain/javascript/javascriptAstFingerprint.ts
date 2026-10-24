@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import * as t from "@babel/types";
 
+import { semanticBindingAtRead } from "./javascriptSemanticMutationInitializers.js";
 import { isUnmodifiedGlobalReference } from "./javascriptSemanticAmbientWrites.js";
 
 import { traverseJavaScriptAst } from "./javascriptSemanticTraversal.js";
@@ -11,7 +12,7 @@ import { semanticStaticPropertyKey } from "./javascriptAstValues.js";
 import { stringValue } from "./javascriptStaticAnalysisHelpers.js";
 import {
   resolveSemanticBindingState,
-  type JavaScriptSemanticAnalysisState,
+  type JavaScriptBindingIndex,
 } from "./javascriptSemanticState.js";
 
 /** Static CommonJS export names. */
@@ -41,9 +42,17 @@ export interface JavaScriptFactoryExportBindings {
 /** Collect statically declared CommonJS/bundler export names from one factory. */
 export const collectJavaScriptExports = (
   node: t.Node,
-  bindings?: JavaScriptSemanticAnalysisState,
-  roles?: JavaScriptFactoryExportBindings,
+  factory?: {
+    readonly roles: JavaScriptFactoryExportBindings;
+    readonly index: Pick<
+      JavaScriptBindingIndex,
+      "bindings" | "effectsForReferenceWithinActivationAt"
+    >;
+  },
 ): StaticExports => {
+  const roles = factory?.roles;
+  const index = factory?.index;
+  const bindings = index?.bindings;
   const exports = new Set<string>();
   const bindingId = (
     reference: t.Node | null | undefined,
@@ -60,7 +69,25 @@ export const collectJavaScriptExports = (
     return (reference: t.Node | null): boolean => {
       if (!t.isIdentifier(reference)) return false;
       if (roles === undefined) return reference.name === fallback;
-      return id !== undefined && bindingId(reference) === id;
+      if (id === undefined || bindings === undefined) return false;
+      const binding = resolveSemanticBindingState(
+        bindings,
+        reference,
+        reference.name,
+      );
+      if (binding?.bindingId !== id) return false;
+      // The calling convention owns the parameter's entry value, not every
+      // later value assigned to the same lexical binding.
+      const read = semanticBindingAtRead(
+        binding,
+        reference,
+        bindings.parentsByNode,
+      );
+      return (
+        read.status === "ordered" &&
+        read.binding.initializers.length === 0 &&
+        read.binding.referenceInitializers.length === 0
+      );
     };
   };
   const isExportsAlias = identity("exports", "exports");
@@ -83,13 +110,22 @@ export const collectJavaScriptExports = (
             "Object",
             "defineProperty",
           ]);
-        collectCallExports(
-          current,
-          exports,
-          receivers,
-          intrinsic,
-          isLoaderAlias,
-        );
+        collectCallExports(current, exports, receivers, intrinsic, (root) => {
+          if (root === null || !isLoaderAlias(root)) return false;
+          if (index === undefined) return true;
+          const facts = index.effectsForReferenceWithinActivationAt(
+            current,
+            root,
+            ["d"],
+          );
+          return (
+            facts.memberEffectsIndexed &&
+            !facts.effects.some(
+              (effect) =>
+                effect.kind === "member-write" && effect.timing !== "after",
+            )
+          );
+        });
       }
       return undefined;
     },

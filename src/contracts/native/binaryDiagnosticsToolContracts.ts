@@ -33,9 +33,17 @@ import {
   peCertificatesSchema,
 } from "../../domain/native/peCertificates.js";
 import {
+  inspectPeImportsInputSchema,
+  peImportsSchema,
+} from "../../domain/native/peImports.js";
+import {
   inspectElfNotesInputSchema,
   elfNotesSchema,
 } from "../../domain/native/elfNotes.js";
+import {
+  inspectAppleIpsInputSchema,
+  appleIpsSchema,
+} from "../../domain/native/appleIps.js";
 
 /** Caller-selected delivery of completed binary layout Evidence. */
 export const inspectBinaryLayoutRequestSchema =
@@ -66,6 +74,21 @@ export const BINARY_DIAGNOSTICS_TOOL_CONTRACTS = [
       {
         title: "Inspect ELF GNU build-id and ABI-tag notes",
         input: { path: "/artifacts/program" },
+      },
+    ],
+  },
+  {
+    name: "inspect_apple_ips",
+    ...toolContractMetadata("inspect_apple_ips"),
+    kind: "native-provider",
+    description:
+      "Inspect one explicit local Apple .ips crash report without executing a target, launching atos, or opening a disassembler. Parses the first-line metadata object and, when bug_type is the string 309, the crash body: process identity, exception and termination facts, threads, usedImages, lossless integer registers, and deterministic classification from documented SIGKILL, EXC_GUARD, pointer-authentication and dyld strings. Other bug_type values, including 288 stackshots, return no crash result. A missing or truncated body fails without partial success. Opened Mach-O and dSYM UUID joins remain unobserved. Portable on supported Node hosts; no Xcode or pwntools required.",
+    inputSchema: inspectAppleIpsInputSchema,
+    outputSchema: evidenceResultOf(appleIpsSchema),
+    examples: [
+      {
+        title: "Inspect an Apple .ips crash report",
+        input: { path: "/artifacts/app.ips" },
       },
     ],
   },
@@ -105,6 +128,21 @@ export const BINARY_DIAGNOSTICS_TOOL_CONTRACTS = [
     examples: [
       {
         title: "Inspect PE Authenticode certificate identities",
+        input: { path: "/artifacts/application.exe" },
+      },
+    ],
+  },
+  {
+    name: "inspect_pe_imports",
+    ...toolContractMetadata("inspect_pe_imports"),
+    kind: "native-provider",
+    description:
+      "Inspect one explicit local PE32/PE32+ image's IMAGE_DIRECTORY_ENTRY_IMPORT and delay-load tables without executing it or opening a disassembler. Returns DLL names, named and ordinal functions, ILT/IAT RVAs, delay-load descriptors, and the pefile import hash of the standard import table, withheld with a reason when that table is partial or pefile would hash a different row sequence. A missing import directory is observed absence of that table, not proof the image never imported APIs through another table or overlay. Bound snapshots, loaded IAT contents and export-forward resolution remain unobserved. Reads a stable regular file; malformed PE headers and exhausted DLL or function budgets return no partial success. Unreadable names or thunks and descriptors missing a required table are reported as partial coverage with issues. Portable on supported Node hosts; no Windows SDK or engine installation required.",
+    inputSchema: inspectPeImportsInputSchema,
+    outputSchema: evidenceResultOf(peImportsSchema),
+    examples: [
+      {
+        title: "Inspect PE import and delay-load identities",
         input: { path: "/artifacts/application.exe" },
       },
     ],

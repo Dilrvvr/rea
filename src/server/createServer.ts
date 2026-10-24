@@ -24,16 +24,22 @@ import { snapshotEnvironment } from "../process/snapshotEnvironment.js";
 import { captureProviderEnvironment } from "./providerEnvironment.js";
 import {
   createElfNotesService,
+  createAppleIpsService,
   createPeCertificatesService,
+  createPeImportsService,
   createNativeExportsService,
   createPeResourcesService,
 } from "../composition/binaryDiagnostics.js";
 import type { ElfNotesService } from "../application/binaryDiagnostics/ElfNotesService.js";
+import type { AppleIpsService } from "../application/binaryDiagnostics/AppleIpsService.js";
 import type { PeCertificatesService } from "../application/binaryDiagnostics/PeCertificatesService.js";
+import type { PeImportsService } from "../application/binaryDiagnostics/PeImportsService.js";
 import type { PeResourcesService } from "../application/binaryDiagnostics/PeResourcesService.js";
 import type { NativeExportsService } from "../application/binaryDiagnostics/NativeExportsService.js";
 import { registerElfNotesTool } from "./registerElfNotesTool.js";
+import { registerAppleIpsTool } from "./registerAppleIpsTool.js";
 import { registerPeCertificatesTool } from "./registerPeCertificatesTool.js";
+import { registerPeImportsTool } from "./registerPeImportsTool.js";
 import { registerPeResourcesTool } from "./registerPeResourcesTool.js";
 import { registerNativeExportsTool } from "./registerNativeExportsTool.js";
 import type { EvmInterfaceService } from "../application/evm/EvmInterfaceService.js";
@@ -467,7 +473,9 @@ export const createServer = (
   const peResources = createPeResourcesService();
   const nativeExports = createNativeExportsService();
   const elfNotes = createElfNotesService();
+  const appleIps = createAppleIpsService();
   const peCertificates = createPeCertificatesService();
+  const peImports = createPeImportsService();
   const electronFuses = options.electronFuses ?? createElectronFuseService();
   const pythonPyc = options.pythonPyc ?? createPythonPycService();
   const webNetworkCapture =
@@ -578,7 +586,9 @@ export const createServer = (
       peResources.close(),
       nativeExports.close(),
       elfNotes.close(),
+      appleIps.close(),
       peCertificates.close(),
+      peImports.close(),
       electronFuses.close(),
       pythonPyc.close(),
       webNetworkCapture.close(),
@@ -646,7 +656,9 @@ export const createServer = (
     peResources,
     nativeExports,
     elfNotes,
+    appleIps,
     peCertificates,
+    peImports,
     electronFuses,
     pythonPyc,
     webNetworkCapture,
@@ -883,7 +895,9 @@ const registerConfiguredAnalysisTools = (
     peResources,
     nativeExports,
     elfNotes,
+    appleIps,
     peCertificates,
+    peImports,
     pythonPyc,
     webNetworkCapture,
     artifactResources,
@@ -950,9 +964,23 @@ const registerConfiguredAnalysisTools = (
     recordEvidence,
     withAdmittedAnalysis,
   );
+  registerAppleIpsTool(
+    server,
+    appleIps,
+    toolLogger,
+    recordEvidence,
+    withAdmittedAnalysis,
+  );
   registerPeCertificatesTool(
     server,
     peCertificates,
+    toolLogger,
+    recordEvidence,
+    withAdmittedAnalysis,
+  );
+  registerPeImportsTool(
+    server,
+    peImports,
     toolLogger,
     recordEvidence,
     withAdmittedAnalysis,
@@ -995,6 +1023,7 @@ const registerConfiguredAnalysisTools = (
     toolLogger,
     recordEvidence,
     withAdmittedAnalysis,
+    evidenceById,
   );
   registerWasmTools(
     server,
@@ -1112,7 +1141,9 @@ interface ServerToolContext extends ReturnType<typeof createSessionRecorders> {
   readonly peResources: PeResourcesService;
   readonly nativeExports: NativeExportsService;
   readonly elfNotes: ElfNotesService;
+  readonly appleIps: AppleIpsService;
   readonly peCertificates: PeCertificatesService;
+  readonly peImports: PeImportsService;
   readonly electronFuses: ElectronFuseService;
   readonly pythonPyc: PythonPycService;
   readonly webNetworkCapture: WebNetworkCaptureService;

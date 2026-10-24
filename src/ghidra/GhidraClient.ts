@@ -40,6 +40,7 @@ import {
   ProviderProcessSupervisor,
 } from "../process/ProviderProcess.js";
 import { DEFAULT_GHIDRA_STARTUP_TIMEOUT_MS } from "../config/providerStartupTimeout.js";
+import { DEFAULT_BRIDGE_MAX_REQUEST } from "../config/bridgeMaxRequestBytes.js";
 import type {
   GhidraClientOptions,
   GhidraRequestOptions,
@@ -199,6 +200,8 @@ export class GhidraClient {
       pending: this.#pending,
       logger: this.#logger,
       failure: this.#failure,
+      bridgeMaxRequestBytes:
+        options.bridgeMaxRequestBytes ?? DEFAULT_BRIDGE_MAX_REQUEST,
     });
     this.#requestQueue = new GhidraRequestQueue(
       async (method, parameters, requestOptions) => {
@@ -483,6 +486,72 @@ export class GhidraClient {
           kind: "file-snapshot-hash",
           path,
           ...value,
+        }),
+      signal,
+    );
+  }
+
+  /**
+   * Hash the immutable snapshot and each byte range in one streamed pass, so a
+   * DOL section is verified without retaining the whole file in memory.
+   */
+  hashTargetSnapshotRanges(
+    ranges: readonly { readonly start: number; readonly end: number }[],
+    signal?: AbortSignal,
+  ): Promise<
+    Result<
+      {
+        readonly sha256: string;
+        readonly bytes: number;
+        readonly rangeSha256: readonly string[];
+      },
+      GhidraSessionError
+    >
+  > {
+    return this.#withTargetSnapshot(
+      async (handle, initial, path) => {
+        for (const range of ranges)
+          if (
+            !Number.isSafeInteger(range.start) ||
+            !Number.isSafeInteger(range.end) ||
+            range.start < 0 ||
+            range.end < range.start ||
+            range.end > initial.size
+          )
+            throw new RangeError("Snapshot range must lie within the target");
+        const hash = createHash("sha256");
+        const rangeHashes = ranges.map(() => createHash("sha256"));
+        let position = 0;
+        for await (const chunk of readArtifactFileChunks(handle, {
+          end: initial.size,
+          signal,
+        })) {
+          const chunkEnd = position + chunk.length;
+          if (chunkEnd > initial.size) throw new RegularFileChangedError(path);
+          hash.update(chunk);
+          ranges.forEach((range, index) => {
+            const start = Math.max(range.start, position);
+            const end = Math.min(range.end, chunkEnd);
+            if (start < end)
+              rangeHashes[index]?.update(
+                chunk.subarray(start - position, end - position),
+              );
+          });
+          position = chunkEnd;
+        }
+        if (position !== initial.size) throw new RegularFileChangedError(path);
+        return {
+          sha256: hash.digest("hex"),
+          bytes: position,
+          rangeSha256: rangeHashes.map((rangeHash) => rangeHash.digest("hex")),
+        };
+      },
+      (value, path) =>
+        fileSnapshotPartialObservationSchema.parse({
+          kind: "file-snapshot-hash",
+          path,
+          sha256: value.sha256,
+          bytes: value.bytes,
         }),
       signal,
     );

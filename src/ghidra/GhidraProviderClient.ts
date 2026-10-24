@@ -39,6 +39,7 @@ import {
   AnalysisInputError,
   AnalysisResourceConstraintError,
   AnalysisTimeoutError,
+  resourceConstraintRecovery,
 } from "../domain/analysisErrorCore.js";
 import type { AnalysisError } from "../domain/analysisErrorBase.js";
 import type { EvidenceLocation } from "../domain/evidence.js";
@@ -106,6 +107,7 @@ import {
 } from "./extensions/GhidraExtensions.js";
 import { inspectWindowsNativeReadiness } from "../process/WindowsAuthority.js";
 import { ghidraRawBinaryLanguage } from "./GhidraRawBinaryLanguage.js";
+import { ghidraDolLanguage, ghidraDolSectionFile } from "./GhidraDolProfile.js";
 
 /** Production seam for exercising provider projection without a real process. */
 export type GhidraProviderClientFactory = (
@@ -119,6 +121,7 @@ export type GhidraProviderClientFactory = (
       | "runtimeLineage"
       | "readTargetSnapshot"
       | "hashTargetSnapshot"
+      | "hashTargetSnapshotRanges"
       | "attestDosTargetSnapshot"
     >
   >;
@@ -313,6 +316,13 @@ export const createGhidraProviderClient = (input: {
           "Static DOS analysis does not emulate BIOS, DOS interrupts, device ports, or self-modifying unpacking code. Packed targets require a separately identified unpacked artifact for original-program analysis; appended overlays are not the initialized load module.",
         ]
       : []),
+    ...(target.format === "gamecube-dol"
+      ? [
+          "GameCube DOL analysis maps the header's text and data sections at their load addresses; file bytes outside those sections (the 256-byte header and any padding) are not mapped.",
+          "The default language is stock Ghidra PowerPC:BE:32:default. Broadway-specific paired-single and Gekko instructions are not decoded unless REA_GHIDRA_LANGUAGE_ID selects an installed variant such as PowerPC:BE:32:Gekko_Broadway.",
+          "BSS is mapped uninitialized only outside the data sections it overlaps. The DOL header is not an identification of the producing SDK, and no runtime initialization, OS, or hardware state is modeled.",
+        ]
+      : []),
     ...(target.format === "raw-binary"
       ? [
           "Headerless raw-binary analysis uses the caller-supplied architecture and entry address; file offset 0 is mapped at that address. Headers are not discovered from file bytes.",
@@ -349,6 +359,7 @@ export const createGhidraProviderClient = (input: {
     );
   const client = clientFactory({
     startupTimeoutMs: config.ghidraStartupTimeoutMs,
+    bridgeMaxRequestBytes: config.bridgeMaxRequestBytes,
     platform: installation.platform,
     launcher: new GhidraHeadlessLauncher({
       environment: input.environment,
@@ -380,9 +391,16 @@ export const createGhidraProviderClient = (input: {
               baseAddr: target.entryPoint,
             },
           }),
-      ...(importLanguage === undefined
-        ? {}
-        : { languageOverride: importLanguage }),
+      ...(target.format === "gamecube-dol"
+        ? {
+            gamecubeDol: {
+              ...ghidraDolLanguage(importLanguage),
+              sectionFile: ghidraDolSectionFile(target.dol),
+            },
+          }
+        : importLanguage === undefined
+          ? {}
+          : { languageOverride: importLanguage }),
       ...(config.ghidraDisabledAnalyzers === undefined
         ? {}
         : { disabledAnalyzers: config.ghidraDisabledAnalyzers }),
@@ -604,6 +622,7 @@ export const createGhidraProviderClient = (input: {
       operation,
       measured: observed,
       client,
+      languageOverride: importLanguage,
       mapSessionError: (failure) =>
         projectSessionError(operation, failure, config, lostProviderHealth()),
       nativeAotResult: derived,
@@ -897,6 +916,17 @@ const projectPrimarySessionError = (
   const { cause: physicalCause, origin } = artifactFilePrimaryFacts(
     failure.cause,
   );
+  // A client-side ceiling refusal travels as the cause; re-attribute it to this
+  // operation so callers see a typed resource constraint rather than a generic
+  // session failure, matching how Hopper and Cutter report the same ceiling.
+  if (physicalCause instanceof AnalysisResourceConstraintError)
+    return new AnalysisResourceConstraintError(
+      operation,
+      physicalCause.resource,
+      physicalCause.reason,
+      physicalCause.reportedLimits,
+      { ...context, ...resourceConstraintRecovery(physicalCause) },
+    );
   if (
     origin === "owned-or-classified" &&
     physicalCause instanceof AnalysisAccessDeniedError

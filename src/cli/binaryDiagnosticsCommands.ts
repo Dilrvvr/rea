@@ -5,8 +5,10 @@ import {
   createRecordedCrashService,
   createBinaryLayoutService,
   createElfNotesService,
+  createAppleIpsService,
   createPeResourcesService,
   createPeCertificatesService,
+  createPeImportsService,
   createNativeExportsService,
 } from "../composition/binaryDiagnostics.js";
 import { CLI_COMMANDS } from "../cliCommandNames.js";
@@ -18,8 +20,10 @@ import { inspectBinaryLayoutInputSchema } from "../domain/native/binaryLayout.js
 import { inspectRecordedCrashInputSchema } from "../domain/native/recordedCrash.js";
 import { inspectPeResourcesInputSchema } from "../domain/native/peResources.js";
 import { inspectPeCertificatesInputSchema } from "../domain/native/peCertificates.js";
+import { inspectPeImportsInputSchema } from "../domain/native/peImports.js";
 import { inspectNativeExportsInputSchema } from "../domain/native/nativeExports.js";
 import { inspectElfNotesInputSchema } from "../domain/native/elfNotes.js";
+import { inspectAppleIpsInputSchema } from "../domain/native/appleIps.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import { finishAnalysisCommand } from "./finishAnalysisCommand.js";
 import { localPathStringSchema } from "../domain/localPath.js";
@@ -65,6 +69,50 @@ export const registerBinaryDiagnosticsCommands = (
               elf,
               "rea-elf-notes",
               "inspect_elf_notes",
+              signal,
+            ),
+        );
+      }),
+  });
+  cli.command(CLI_COMMANDS.inspectAppleIps, {
+    description:
+      "Inspect an Apple .ips crash report without executing a target",
+    args: z.object({
+      path: z.string().describe("Local Apple .ips crash report"),
+    }),
+    options: z.object({
+      maxFileBytes: inspectAppleIpsInputSchema.shape.max_file_bytes,
+      maxThreads: inspectAppleIpsInputSchema.shape.max_threads,
+      maxFrames: inspectAppleIpsInputSchema.shape.max_frames,
+      maxImages: inspectAppleIpsInputSchema.shape.max_images,
+      maxRegisters: inspectAppleIpsInputSchema.shape.max_registers,
+      maxIntegerTextBytes:
+        inspectAppleIpsInputSchema.shape.max_integer_text_bytes,
+    }),
+    run: ({ args, options }) =>
+      withCommandCancellation(async (signal) => {
+        const ips = createAppleIpsService();
+        return await logCliCommand(
+          logger,
+          CLI_COMMANDS.inspectAppleIps,
+          async () =>
+            finishAnalysisCommand(
+              () =>
+                ips.inspect(
+                  {
+                    path: absoluteCallerPath(args.path),
+                    max_file_bytes: options.maxFileBytes,
+                    max_threads: options.maxThreads,
+                    max_frames: options.maxFrames,
+                    max_images: options.maxImages,
+                    max_registers: options.maxRegisters,
+                    max_integer_text_bytes: options.maxIntegerTextBytes,
+                  },
+                  { signal },
+                ),
+              ips,
+              "rea-apple-ips",
+              "inspect_apple_ips",
               signal,
             ),
         );
@@ -138,6 +186,41 @@ export const registerBinaryDiagnosticsCommands = (
               pe,
               "rea-pe-certificates",
               "inspect_pe_certificates",
+              signal,
+            ),
+        );
+      }),
+  });
+  cli.command(CLI_COMMANDS.inspectPeImports, {
+    description:
+      "Inspect PE import and delay-load table identities without executing the image",
+    args: z.object({ path: z.string().describe("Local PE32/PE32+ image") }),
+    options: z.object({
+      maxFileBytes: inspectPeImportsInputSchema.shape.max_file_bytes,
+      maxDlls: inspectPeImportsInputSchema.shape.max_dlls,
+      maxFunctions: inspectPeImportsInputSchema.shape.max_functions,
+    }),
+    run: ({ args, options }) =>
+      withCommandCancellation(async (signal) => {
+        const pe = createPeImportsService();
+        return await logCliCommand(
+          logger,
+          CLI_COMMANDS.inspectPeImports,
+          async () =>
+            finishAnalysisCommand(
+              () =>
+                pe.inspect(
+                  {
+                    path: absoluteCallerPath(args.path),
+                    max_file_bytes: options.maxFileBytes,
+                    max_dlls: options.maxDlls,
+                    max_functions: options.maxFunctions,
+                  },
+                  { signal },
+                ),
+              pe,
+              "rea-pe-imports",
+              "inspect_pe_imports",
               signal,
             ),
         );

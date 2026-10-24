@@ -9,25 +9,16 @@ import {
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import { spawn } from "@lydell/node-pty";
-
 import { TOOL_CONTRACTS } from "../dist/contracts/toolContracts.js";
 import { PRODUCT_IDENTITY } from "../dist/identity.js";
-import {
-  json,
-  pathExists,
-  run,
-  runWithStatus,
-} from "./lib/verify-package-core.mjs";
+import { json, pathExists } from "./lib/verify-package-core.mjs";
 import { parse as parseJsonc } from "jsonc-parser";
 import { skillReferenceIssues } from "./lib/docs-facts.mjs";
+import {
+  verifyInteractiveSetup,
+  verifyRedirectedStdoutSetup,
+} from "./lib/verify-setup-terminal.mjs";
 import { setupPlanFailureMessage } from "./verify-package-setup-plan.mjs";
-
-export const terminalModesRestored = (termios) => {
-  if (typeof termios !== "string") return false;
-  const modes = new Set(termios.trim().split(/\s+/u));
-  return modes.has("icanon") && modes.has("echo");
-};
 
 const OPENCODE_ORIGINAL = `{
   // OpenCode preferences must survive setup.
@@ -46,195 +37,16 @@ const CODEX_ORIGINAL = [
   "",
 ].join("\n");
 
-const verifyMcpAdd = async ({ cli, environment, npxLog }) => {
-  await run(cli, ["mcp", "add"], environment);
+const verifyMcpAdd = async ({ commands, cli, environment, npxLog }) => {
+  await commands.run(cli, ["mcp", "add"], environment);
   const mcpRegistration = await readFile(npxLog, "utf8");
   const expected = `add-mcp npx -y ${PRODUCT_IDENTITY.registrationPackageSpecifier} mcp --name rea`;
   if (!mcpRegistration.includes(expected))
     throw new Error("Incur mcp add did not register the pinned npx command");
 };
 
-const snapshotFiles = async (paths) =>
-  Promise.all(
-    paths.map(async (path) => {
-      const exists = await pathExists(path);
-      return {
-        path,
-        exists,
-        content: exists ? await readFile(path, "utf8") : null,
-      };
-    }),
-  );
-
-const assertFilesUnchanged = async (snapshot, label) => {
-  for (const entry of snapshot) {
-    const exists = await pathExists(entry.path);
-    const content = exists ? await readFile(entry.path, "utf8") : null;
-    if (exists !== entry.exists || content !== entry.content)
-      throw new Error(`${label} changed ${entry.path}`);
-  }
-};
-
-const verifyInteractiveSetup = async ({
-  command,
-  environment,
-  root,
-  unchangedPaths,
-}) =>
-  new Promise((resolvePromise, reject) => {
-    let output = "";
-    let cancelled = false;
-    let settled = false;
-    const unchanged = snapshotFiles(unchangedPaths);
-    const wrapper = `
-      const { spawnSync } = require("node:child_process");
-      const child = spawnSync(process.argv[1], ["setup"], { stdio: "inherit", env: process.env, shell: process.platform === "win32" });
-      const terminal = process.platform === "win32"
-        ? spawnSync("cmd.exe", ["/c", "mode", "CON"], { encoding: "utf8", stdio: ["inherit", "pipe", "inherit"] })
-        : spawnSync("stty", ["-a"], { encoding: "utf8", stdio: ["inherit", "pipe", "inherit"] });
-      process.stdout.write("\\n__REA_SETUP_EXIT__" + JSON.stringify({ status: child.status, termios: terminal.stdout, error: child.error?.message }));
-      process.exit(child.status ?? 1);
-    `;
-    const terminal = spawn(process.execPath, ["-e", wrapper, command], {
-      cwd: root,
-      env: { ...environment, NO_COLOR: "1", TERM: "xterm-256color" },
-      name: "xterm-256color",
-      cols: 120,
-      rows: 40,
-    });
-    const finish = (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      if (error === undefined) resolvePromise();
-      else reject(error);
-    };
-    const timeout = setTimeout(() => {
-      terminal.kill();
-      finish(
-        new Error(`packaged setup wizard timed out after output: ${output}`),
-      );
-    }, 20_000);
-
-    terminal.onData((data) => {
-      output += data;
-      if (!cancelled && output.includes("Which agents should use REA?")) {
-        cancelled = true;
-        terminal.write("\u0003");
-      }
-    });
-    terminal.onExit(async ({ exitCode }) => {
-      const marker = output.lastIndexOf("__REA_SETUP_EXIT__");
-      const result = marker < 0 ? undefined : output.slice(marker + 18).trim();
-      let childResult;
-      try {
-        childResult = result === undefined ? undefined : JSON.parse(result);
-      } catch {
-        childResult = undefined;
-      }
-      if (
-        !cancelled ||
-        exitCode !== 0 ||
-        childResult?.status !== 0 ||
-        !output.includes("\u001b[?25h") ||
-        (process.platform !== "win32" &&
-          !terminalModesRestored(childResult.termios)) ||
-        !output.includes("No changes were made.")
-      ) {
-        finish(
-          new Error(
-            `packaged rea-agents setup did not cancel with a restored terminal and exit 0: ${output}`,
-          ),
-        );
-        return;
-      }
-      try {
-        await assertFilesUnchanged(await unchanged, "Interactive cancellation");
-        finish();
-      } catch (error) {
-        finish(error);
-      }
-    });
-  });
-
-const verifyRedirectedStdoutSetup = async ({
-  command,
-  environment,
-  root,
-  unchangedPaths,
-}) =>
-  new Promise((resolvePromise, reject) => {
-    let output = "";
-    let settled = false;
-    const unchanged = snapshotFiles(unchangedPaths);
-    const wrapper = `
-      const { spawnSync } = require("node:child_process");
-      const child = spawnSync(process.argv[1], ["setup"], { encoding: "utf8", env: process.env, stdio: ["inherit", "pipe", "inherit"], shell: process.platform === "win32" });
-      process.stdout.write("\\n__REA_REDIRECTED_SETUP__" + JSON.stringify({ status: child.status, stdout: child.stdout, error: child.error?.message, stdinTTY: process.stdin.isTTY, stderrTTY: process.stderr.isTTY, stdoutRedirected: true }));
-      process.exit(child.status ?? 1);
-    `;
-    const terminal = spawn(process.execPath, ["-e", wrapper, command], {
-      cwd: root,
-      env: { ...environment, NO_COLOR: "1", TERM: "xterm-256color" },
-      name: "xterm-256color",
-      cols: 120,
-      rows: 40,
-    });
-    const finish = (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      if (error === undefined) resolvePromise();
-      else reject(error);
-    };
-    const timeout = setTimeout(() => {
-      terminal.kill();
-      finish(
-        new Error(
-          `packaged setup started an interactive prompt with redirected stdout: ${output}`,
-        ),
-      );
-    }, 15_000);
-    terminal.onData((data) => {
-      output += data;
-    });
-    terminal.onExit(async ({ exitCode }) => {
-      const marker = output.lastIndexOf("__REA_REDIRECTED_SETUP__");
-      let childResult;
-      try {
-        childResult =
-          marker < 0 ? undefined : JSON.parse(output.slice(marker + 24).trim());
-      } catch {
-        childResult = undefined;
-      }
-      const allOutput = `${output}\n${childResult?.stdout ?? ""}`;
-      if (
-        (exitCode !== 0 && exitCode !== 1) ||
-        childResult?.status !== exitCode ||
-        childResult.stdinTTY !== true ||
-        childResult.stderrTTY !== true ||
-        childResult.stdoutRedirected !== true ||
-        childResult.stdout?.includes("Which agents should use REA?") ||
-        allOutput.includes("Which agents should use REA?") ||
-        /\u001b\[[0-9;?]*[ -/]*[@-~]/u.test(allOutput)
-      ) {
-        finish(
-          new Error(
-            `packaged setup did not remain plain and non-interactive with redirected stdout: ${output}`,
-          ),
-        );
-        return;
-      }
-      try {
-        await assertFilesUnchanged(await unchanged, "Redirected-stdout setup");
-        finish();
-      } catch (error) {
-        finish(error);
-      }
-    });
-  });
-
 const verifySetupPlan = async ({
+  commands,
   cli,
   environment,
   claudeConfig,
@@ -244,7 +56,7 @@ const verifySetupPlan = async ({
   opencodeOriginal,
   supportedSetupHost,
 }) => {
-  const plannedExecution = await runWithStatus(
+  const plannedExecution = await commands.runWithStatus(
     cli,
     ["setup", "--all-detected", "--dry-run", "--json"],
     environment,
@@ -287,12 +99,17 @@ const verifySetupPlan = async ({
   return { planned };
 };
 
-const verifyAbsentOpenCodeSetup = async ({ cli, environment, home }) => {
+const verifyAbsentOpenCodeSetup = async ({
+  commands,
+  cli,
+  environment,
+  home,
+}) => {
   const xdgConfigHome = join(home, ".xdg-opencode-absent");
   const configPath = join(xdgConfigHome, "opencode", "opencode.json");
   if (await pathExists(configPath))
     throw new Error("packaged OpenCode first-run fixture was not absent");
-  const execution = await runWithStatus(
+  const execution = await commands.runWithStatus(
     cli,
     ["setup", "--yes", "--client", "opencode", "--skill=false", "--json"],
     { ...environment, XDG_CONFIG_HOME: xdgConfigHome },
@@ -313,7 +130,12 @@ const verifyAbsentOpenCodeSetup = async ({ cli, environment, home }) => {
   await rm(xdgConfigHome, { recursive: true, force: true });
 };
 
-const verifyAbsentClaudeCodeSetup = async ({ cli, environment, home }) => {
+const verifyAbsentClaudeCodeSetup = async ({
+  commands,
+  cli,
+  environment,
+  home,
+}) => {
   const freshHome = join(home, ".claude-code-absent-home");
   const configPath = join(freshHome, ".claude.json");
   const markerPath = join(freshHome, ".claude");
@@ -336,7 +158,11 @@ const verifyAbsentClaudeCodeSetup = async ({ cli, environment, home }) => {
     "--skill=false",
     "--json",
   ];
-  const firstExecution = await runWithStatus(cli, args, childEnvironment);
+  const firstExecution = await commands.runWithStatus(
+    cli,
+    args,
+    childEnvironment,
+  );
   const first = json(firstExecution.stdout);
   const config = json(await readFile(configPath, "utf8"));
   const registration = first.doctor.identity?.registrations?.find(
@@ -355,7 +181,11 @@ const verifyAbsentClaudeCodeSetup = async ({ cli, environment, home }) => {
     throw new Error(
       `packaged setup did not configure an explicitly selected Claude Code with no marker directory: ${JSON.stringify(first)}`,
     );
-  const repeatExecution = await runWithStatus(cli, args, childEnvironment);
+  const repeatExecution = await commands.runWithStatus(
+    cli,
+    args,
+    childEnvironment,
+  );
   const repeat = json(repeatExecution.stdout);
   if (
     repeatExecution.status !== 0 ||
@@ -370,6 +200,7 @@ const verifyAbsentClaudeCodeSetup = async ({ cli, environment, home }) => {
 };
 
 const verifySetupApply = async ({
+  commands,
   cli,
   environment,
   supportedSetupHost,
@@ -378,19 +209,19 @@ const verifySetupApply = async ({
   const status = "ready";
   const hopperStatus =
     hopperSetupSupported === true ? "needs_confirmation" : "needs_human";
-  const firstExecution = await runWithStatus(
+  const firstExecution = await commands.runWithStatus(
     cli,
     ["setup", "--yes", "--all-detected", "--json"],
     environment,
   );
   const first = json(firstExecution.stdout);
-  const alignedExecution = await runWithStatus(
+  const alignedExecution = await commands.runWithStatus(
     cli,
     ["setup", "--all-detected", "--json"],
     environment,
   );
   const aligned = json(alignedExecution.stdout);
-  const secondExecution = await runWithStatus(
+  const secondExecution = await commands.runWithStatus(
     cli,
     [
       "setup",
@@ -520,8 +351,8 @@ const assertSkill = async ({ skillPath, siblingSkillPath, root }) => {
     throw new Error("packaged skill installation modified a sibling skill");
 };
 
-const assertAlignedDoctor = async (cli, environment) => {
-  const alignedDoctorExecution = await runWithStatus(
+const assertAlignedDoctor = async (commands, cli, environment) => {
+  const alignedDoctorExecution = await commands.runWithStatus(
     cli,
     ["doctor", "--json"],
     environment,
@@ -540,6 +371,7 @@ const assertAlignedDoctor = async (cli, environment) => {
 };
 
 const verifyConfigReadback = async ({
+  commands,
   cli,
   environment,
   claudeConfig,
@@ -575,10 +407,11 @@ const verifyConfigReadback = async ({
     throw new Error(
       "packaged OpenCode backup did not preserve the original JSONC",
     );
-  await assertAlignedDoctor(cli, environment);
+  await assertAlignedDoctor(commands, cli, environment);
 };
 
 const verifySetupFailureRecovery = async ({
+  commands,
   cli,
   environment,
   claudeConfig,
@@ -587,7 +420,7 @@ const verifySetupFailureRecovery = async ({
 }) => {
   await writeFile(claudeConfig, "malformed");
   await writeFile(cursorConfig, '{"existing":true}\n');
-  const failedExecution = await runWithStatus(
+  const failedExecution = await commands.runWithStatus(
     cli,
     ["setup", "--yes", "--all-detected", "--json"],
     environment,
@@ -607,7 +440,7 @@ const verifySetupFailureRecovery = async ({
       `packaged setup mutated clients after a preflight failure: ${JSON.stringify(failed)}`,
     );
   await writeFile(claudeConfig, "{}\n");
-  const recoveredExecution = await runWithStatus(
+  const recoveredExecution = await commands.runWithStatus(
     cli,
     ["setup", "--yes", "--all-detected", "--json"],
     environment,
@@ -621,12 +454,12 @@ const verifySetupFailureRecovery = async ({
     throw new Error("packaged setup did not recover");
 };
 
-const verifyDanglingSymlink = async ({ cli, environment, home }) => {
+const verifyDanglingSymlink = async ({ commands, cli, environment, home }) => {
   const geminiDir = join(home, ".gemini");
   const geminiConfig = join(geminiDir, "settings.json");
   await mkdir(geminiDir, { recursive: true });
   await symlink(join(home, "missing-gemini.json"), geminiConfig);
-  const danglingExecution = await runWithStatus(
+  const danglingExecution = await commands.runWithStatus(
     cli,
     ["setup", "--yes", "--client", "gemini_cli", "--json"],
     environment,
@@ -649,6 +482,7 @@ const verifyDanglingSymlink = async ({ cli, environment, home }) => {
 };
 
 const verifyUninstall = async ({
+  commands,
   cli,
   environment,
   cursorConfig,
@@ -657,7 +491,7 @@ const verifyUninstall = async ({
   codexTarget,
   opencodeConfig,
 }) => {
-  const uninstallExecution = await runWithStatus(
+  const uninstallExecution = await commands.runWithStatus(
     cli,
     ["uninstall", "--json"],
     environment,
@@ -707,6 +541,7 @@ const verifyUninstall = async ({
 
 /** Verify setup transactions, skill installation, and uninstall for supported hosts. */
 export async function verifyPackageSetup({
+  commands,
   cli,
   packageRunnerCli,
   environment,
@@ -721,7 +556,7 @@ export async function verifyPackageSetup({
   hopperSetupSupported,
   root,
 }) {
-  await verifyMcpAdd({ cli, environment, npxLog });
+  await verifyMcpAdd({ commands, cli, environment, npxLog });
   const skillPath = join(
     home,
     ".agents/skills/reverse-engineer-anything/SKILL.md",
@@ -752,18 +587,21 @@ export async function verifyPackageSetup({
     ? await Promise.all([readFile(claudeConfig), readFile(cursorConfig)])
     : [];
   await verifyInteractiveSetup({
+    commands,
     command: packageRunnerCli,
     environment,
     root,
     unchangedPaths,
   });
   await verifyRedirectedStdoutSetup({
+    commands,
     command: packageRunnerCli,
     environment,
     root,
     unchangedPaths,
   });
   await verifySetupPlan({
+    commands,
     cli,
     environment,
     claudeConfig,
@@ -774,15 +612,17 @@ export async function verifyPackageSetup({
     supportedSetupHost,
   });
   const apply = await verifySetupApply({
+    commands,
     cli,
     environment,
     supportedSetupHost,
     hopperSetupSupported,
   });
   if (supportedSetupHost) {
-    await verifyAbsentOpenCodeSetup({ cli, environment, home });
-    await verifyAbsentClaudeCodeSetup({ cli, environment, home });
+    await verifyAbsentOpenCodeSetup({ commands, cli, environment, home });
+    await verifyAbsentClaudeCodeSetup({ commands, cli, environment, home });
     await verifyConfigReadback({
+      commands,
       cli,
       environment,
       claudeConfig,
@@ -798,14 +638,16 @@ export async function verifyPackageSetup({
       cursorOriginal,
     });
     await verifySetupFailureRecovery({
+      commands,
       cli,
       environment,
       claudeConfig,
       cursorConfig,
       status: apply.status,
     });
-    await verifyDanglingSymlink({ cli, environment, home });
+    await verifyDanglingSymlink({ commands, cli, environment, home });
     await verifyUninstall({
+      commands,
       cli,
       environment,
       cursorConfig,
