@@ -105,10 +105,7 @@ const osVersionOf = (
   read: FieldReader,
 ): AppleIps["process"]["os_version"] => {
   if (value === undefined || value.kind === "null") return null;
-  if (value.kind === "string")
-    return value.value.length === 0
-      ? null
-      : { form: "text", text: value.value };
+  if (value.kind === "string") return { form: "text", text: value.value };
   if (value.kind !== "object") {
     read.mismatch("body.osVersion", "string or object", value);
     return null;
@@ -175,6 +172,20 @@ const threadStateOf = (
   });
   for (const [key, entry] of Object.entries(members)) {
     if (key === "x" || key === "flavor") continue;
+    if (key === "rosetta") {
+      // A translated process records Rosetta's registers as a nested state.
+      const rosetta = read.object(entry, `${path}.rosetta`);
+      for (const [name, nested] of Object.entries(rosetta?.members ?? {})) {
+        const register = registerValue(
+          `rosetta.${name}`,
+          nested,
+          `${path}.rosetta.${name}`,
+          read,
+        );
+        if (register !== null) registers.push(register);
+      }
+      continue;
+    }
     const register = registerValue(key, entry, `${path}.${key}`, read);
     if (register !== null) registers.push(register);
   }
@@ -210,7 +221,8 @@ const imagesOf = (
       base: read.integer(members.base, `${path}.base`),
       size: read.integer(members.size, `${path}.size`),
       uuid: uuid.uuid,
-      uuid_unknown: uuid.unknown || arch === null,
+      uuid_unknown: uuid.unknown || arch === null || arch === "",
+      name: read.text(members.name, `${path}.name`),
       path: read.text(members.path, `${path}.path`),
     };
   });
@@ -272,6 +284,10 @@ const threadsOf = (
         role,
         inline,
         recorded_symbol: read.text(frameMembers.symbol, `${framePath}.symbol`),
+        symbol_location: read.integer(
+          frameMembers.symbolLocation,
+          `${framePath}.symbolLocation`,
+        ),
       };
     });
     return {

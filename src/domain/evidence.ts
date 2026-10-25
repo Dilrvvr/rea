@@ -26,6 +26,7 @@ import {
   freezeJsonSnapshot,
   freezeOwnedJsonTreeSnapshot,
   canBorrowParsedJsonSnapshot,
+  immutableJsonSnapshotMember,
   isImmutableJsonSnapshot,
 } from "./immutableJson.js";
 import { digestSchema } from "./../domain/digests.js";
@@ -241,13 +242,14 @@ type ExecutionEnvironment = z.infer<typeof executionEnvironmentSchema>;
 
 export type EvidenceProvider = Readonly<z.output<typeof providerSchema>>;
 
-export interface EvidenceObservation {
+/** Payloads admitted and snapshotted by the ordinary Evidence constructor. */
+export interface EvidenceObservationInput {
   readonly predicateType?: string;
   readonly operation: string;
-  readonly parameters: Readonly<Record<string, JsonValue>>;
-  readonly result: JsonValue;
+  readonly parameters: unknown;
+  readonly result: unknown;
   readonly analysisProfile?: AnalysisProfileCommitment;
-  readonly rawResult?: JsonValue;
+  readonly rawResult?: unknown;
   readonly confidence?: "observed" | "derived" | "inferred";
   readonly authority?: EvidenceAuthority;
   readonly environment?: ExecutionEnvironment | null;
@@ -257,6 +259,13 @@ export interface EvidenceObservation {
   readonly subjectUnavailableReason?: string;
   readonly locations?: readonly EvidenceLocation[];
   readonly evidenceLinks?: readonly string[];
+}
+
+/** Producer facts that already promise JSON, including cooperative Evidence input. */
+export interface EvidenceObservation extends EvidenceObservationInput {
+  readonly parameters: Readonly<Record<string, JsonValue>>;
+  readonly result: JsonValue;
+  readonly rawResult?: JsonValue;
 }
 
 type EvidenceWithoutId = Omit<EvidenceSchemaValue, "evidence_id">;
@@ -355,11 +364,7 @@ export const rebindEvidenceToTargetPath = (
   // The original authenticated Evidence owns immutable payloads. Only the
   // small display subject and envelope are new, so preserve those payloads
   // without reparsing a potentially large analysis result.
-  Object.freeze(reboundSubject.digest);
-  Object.freeze(reboundSubject);
-  Object.freeze(reboundEvidence);
-  immutableEvidenceSnapshots.set(reboundEvidence, reboundEvidence);
-  return reboundEvidence;
+  return rememberReboundEvidence(evidence, reboundEvidence);
 };
 
 /** Bind the exact selected request path without changing semantic identity or stored history. */
@@ -372,12 +377,23 @@ export const withEvidenceCallerInputPath = (
   if (owned.caller_input_path === callerInputPath) return owned;
   // The authenticated source owns its immutable payloads. Only this small
   // envelope changes, so replay does not copy a document-sized result.
-  const rebound = Object.freeze({
+  const rebound = {
     ...owned,
     caller_input_path: callerInputPath,
-  });
-  immutableEvidenceSnapshots.set(rebound, rebound);
-  return rebound;
+  };
+  return rememberReboundEvidence(owned, rebound);
+};
+
+/** Carry the source's sealing proof before sealing only the changed envelope. */
+const rememberReboundEvidence = (
+  source: Evidence,
+  rebound: Evidence,
+): Evidence => {
+  // Each own member belongs to an authenticated immutable source. Register
+  // these shared roots so sealing the envelope never walks their payloads.
+  for (const key of Object.keys(source))
+    immutableJsonSnapshotMember(source, key);
+  return rememberImmutableEvidence(rebound);
 };
 
 /** Recognize authenticated Evidence whose complete reachable JSON data is immutable. */
@@ -395,11 +411,11 @@ export interface EvidenceCreationOptions {
   readonly immutable?: boolean;
 }
 
-/** Build deterministic Evidence from an immutable artifact subject. */
+/** Admit payloads into deterministic Evidence bound to an immutable artifact subject. */
 export const createEvidence = (
   target: EvidenceSubjectTarget | BinaryTarget | undefined,
   provider: EvidenceProvider,
-  observation: EvidenceObservation,
+  observation: EvidenceObservationInput,
   options?: EvidenceCreationOptions,
 ): Evidence => {
   const { normalized, sharedResult } = normalizeEvidenceObservation(
@@ -452,7 +468,7 @@ export function* createImmutableEvidenceSteps(
 const normalizeEvidenceObservation = (
   target: EvidenceSubjectTarget | BinaryTarget | undefined,
   provider: EvidenceProvider,
-  observation: EvidenceObservation,
+  observation: EvidenceObservationInput,
 ) => {
   const subject =
     target === undefined
@@ -501,7 +517,7 @@ const normalizeEvidenceObservation = (
       : { relationship_coverage: observation.relationshipCoverage }),
     locations: [...(observation.locations ?? [])],
     evidence_links: [...(observation.evidenceLinks ?? [])],
-  } satisfies JsonValue;
+  };
   const sharedResult =
     typeof observation.result === "object" &&
     observation.result !== null &&

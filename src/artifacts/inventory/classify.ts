@@ -49,37 +49,6 @@ export interface RootInventorySource extends StableRegularFileDescriptor {
   readonly owner: OwnedFileHandle;
 }
 
-/** Classify and hash one file root through the same stable open descriptor. */
-export const classifyAndHashRoot = async (
-  path: string,
-  directory: boolean,
-  expectedMetadata: Stats,
-  options: Pick<ArtifactInventoryOptions, "resourceScope" | "signal">,
-): Promise<RootClassification> => {
-  return options.resourceScope.run(async () => {
-    const result = await classifyAndHashRootForInventory(
-      path,
-      directory,
-      expectedMetadata,
-      options,
-    );
-    const rootSource = result.rootSource;
-    if (rootSource !== undefined) {
-      const owner: ArtifactResourceOwner = {
-        kind: "file-handle",
-        handle: rootSource.owner,
-        resource: `root artifact descriptor for ${path}`,
-      };
-      const cleanupAttempt = await options.resourceScope.release(owner);
-      if (cleanupAttempt.kind === "failed")
-        throw options.resourceScope.cleanupFailure({ kind: "completed" }, [
-          cleanupAttempt,
-        ]);
-    }
-    return { format: result.format, digest: result.digest };
-  });
-};
-
 /** Classify a root and retain its admitted ZIP descriptor for child inventory. */
 export const classifyAndHashRootForInventory = async (
   path: string,
@@ -92,15 +61,15 @@ export const classifyAndHashRootForInventory = async (
 ): Promise<RootInventoryClassification> => {
   if (directory)
     return { format: "directory", digest: null, rootSource: undefined };
-  const ownedHandle = await openRootArtifact(
+  const source = await openRootArtifact(
     path,
     options.resourceScope,
     options.signal,
   );
-  const handle = ownedHandle.handle;
+  const { handle, initial } = source;
   const owner: ArtifactResourceOwner = {
     kind: "file-handle",
-    handle: ownedHandle,
+    handle: source.owner,
     resource: `root artifact descriptor for ${path}`,
   };
   let outcome:
@@ -110,7 +79,6 @@ export const classifyAndHashRootForInventory = async (
       }
     | { readonly kind: "failed"; readonly cause: unknown };
   try {
-    const initial = await handle.stat();
     if (!sameRegularFileState(expectedMetadata, initial))
       throw new ArtifactReaderFailure(
         "integrity",
@@ -139,9 +107,7 @@ export const classifyAndHashRootForInventory = async (
       value: {
         format,
         digest,
-        rootSource: retainSource
-          ? { handle, initial, owner: ownedHandle }
-          : undefined,
+        rootSource: retainSource ? source : undefined,
       },
     };
   } catch (cause: unknown) {

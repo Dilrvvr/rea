@@ -86,6 +86,7 @@ const threadShape = (
             "imageIndex",
             "imageOffset",
             "symbol",
+            "symbolLocation",
             "inline",
           ),
         },
@@ -96,6 +97,13 @@ const threadShape = (
         members: {
           flavor: SCALAR,
           x: { kind: "array", items: register, beforeItem: take.registers },
+          // Rosetta-translated processes nest their translator registers.
+          rosetta: {
+            kind: "object",
+            members: {},
+            rest: register,
+            beforeRest: take.registers,
+          },
         },
         rest: register,
         beforeRest: take.registers,
@@ -173,6 +181,7 @@ export const ipsBodyShape = (input: InspectAppleIpsInput): JsonShape => {
             "base",
             "size",
             "uuid",
+            "name",
             "path",
           ),
         },
