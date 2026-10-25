@@ -20,8 +20,8 @@ import type {
   ExecutionOptions,
   AnalysisOperationPort,
   ProviderIdentity,
+  AnalysisOperation,
 } from "../AnalysisProvider.js";
-import type { AnalysisOperation } from "../AnalysisProvider.js";
 import { OFFICIAL_TOOL_CONTRACTS } from "../../contracts/officialToolContracts.js";
 import { ENHANCED_TOOL_CONTRACTS } from "../../contracts/enhancedToolContracts.js";
 import type {
@@ -36,6 +36,7 @@ import { InvestigationRecords } from "../investigation/InvestigationRecords.js";
 import { recordEvidenceSources } from "../investigation/recordEvidenceSources.js";
 import { BinarySessionRecords } from "./BinarySessionRecords.js";
 import { binarySessionStatus } from "./BinarySessionStatus.js";
+import type { BinarySessionDetail } from "../../contracts/sessionStatusContract.js";
 import {
   resolveSessionOpen,
   resolveSessionTarget,
@@ -1024,7 +1025,12 @@ export class BinarySession
   }
 
   /** Describe the active binary session. */
-  status(options: { readonly signal?: AbortSignal } = {}): Promise<JsonValue> {
+  status(
+    options: {
+      readonly signal?: AbortSignal;
+      readonly detail?: BinarySessionDetail;
+    } = {},
+  ): Promise<JsonValue> {
     const resourceRun = this.#activeBundleResources;
     const run =
       this.#active ??
