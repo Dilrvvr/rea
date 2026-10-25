@@ -242,6 +242,36 @@ to `/absolute/view-request.json`, then run
 `rea inspect-analysis-view /absolute/view-request.json --json`. This also reads
 pre-summary source records without changing their identity; no live provider is started.
 
+`procedure_address`, `procedure_callees`, `procedure_callers`,
+`resolve_containing_procedure` and `get_call_graph` also accept `detail: "summary"`
+(complete remains the default). The summary includes the first 64 recorded
+observations, exact source parameters and provider/profile identity, relationship
+coverage where recorded, and the retained complete parent's ID. Continue with
+`view: {"kind":"native-observation","offset":64,"limit":64}`. Array positions
+retain `source_index`; graph rows additionally retain their original `level`.
+Graph pages order levels by Unicode code point and keep original row order within
+each level. A recorded empty level is a `status: "empty-level"` row with
+`source_index: null`; observation counts include these markers. Graph diagnostic,
+limitation and reason IDs index that page's `items.messages` dictionary. Expand
+those references to recover exact text, repeated messages, and absent versus
+empty optional fields. Failed nodes retain their original error.
+
+These views reference complete source context through `source_context.digest`
+and caveat counts. Read it using the same parent with
+`view: {"kind":"native-context","facet":"overview"}`. The other facets are
+`analysis-profile`, `limitations` and `result-limitations`; all accept `offset`
+and `limit`. Overview includes source subject, provider, authority, execution
+environment and profile digest. Full profiles and caveat text remain accessible
+without repeating them in every fact response. Context digests follow Evidence's
+semantic subject identity, so caller-selected path aliases preserve context
+identity while responses retain the selected display path. A null profile means
+unavailable; null result-limitations means not applicable to a primitive and
+is distinct from an observed empty graph limitation list. Until the source
+caveats have been inspected, interpretations beyond the returned facts remain
+unknown. Exhausted pages describe the recorded observations and do not establish
+complete native discovery. The same views work through the CLI with historical
+Evidence files or bundles and require no live provider.
+
 For oversized native function Evidence, `details.reported_limits.continuation`
 contains a ready-to-call `inspect_analysis_view` request for the retained
 pseudocode's first page. Use its `name` and `arguments` directly, then follow
@@ -1220,34 +1250,16 @@ after SDK conversion and check advertised validation and actual calls.
 Individual model APIs can impose additional nesting limits; complete producer
 captures can exceed ten structural levels.
 
-Claude Desktop drops a local connector tool, with a generic "problem with that
-connector" warning, when its input schema serialized as compact JSON exceeds
-64 KiB ([#4081](https://github.com/morluto/rea/issues/4081)). Every advertised
-input schema therefore fits 65,536 UTF-8 bytes, including its examples. A
-self-contained schema that would exceed the limit is fitted in two steps, and
-its root description says it is summarized. First, a property whose schema
-repeats an earlier sibling's, such as `after` beside `before`, is advertised as
-its types and description plus "Same schema as `before`." Second, schemas below
-the deepest instance level that still fits are advertised as their types, size
-constraints and descriptions, unless that summary would be longer than the
-schema itself. Combinator and conditional branches count as the
-level of the instance they describe. Both steps only widen the advertisement:
-canonical inputs and examples stay accepted, required names and nested
-constraints below the cut are not advertised, and the canonical contract still
-validates every call. Schemas within the limit are advertised unchanged. The
-compact profile starts from the complete projection, not from the fitted one.
-
 `search_bytes` advertises its pattern and mask as descriptive strings. Its
 shared canonical validator scans byte pairs, whitespace, wildcards and aligned
 masks without a repeating regular expression or temporary byte arrays. The
 server rejects malformed or unconstrained patterns before provider dispatch;
 the advertised strings alone do not express those rules.
 
-Boolean, numeric and empty-string literal constraints in input schemas are
-relaxed only in this advertisement. Boolean `const` becomes `type: boolean`;
-numeric `const` keeps its numeric type; empty-string `const`, an enum containing
-an empty string, and an enum containing a number are widened without dropping
-an accepted value. Defaults and descriptions remain intact.
+Boolean and empty-string literal constraints in input schemas are relaxed only
+in this advertisement. Boolean `const` becomes `type: boolean`; empty-string
+`const` or an enum containing an empty string is widened without dropping the
+accepted empty value. Defaults and descriptions remain intact.
 An affected `not` is omitted, conditional predicates and their branches are
 omitted together, pure boolean-literal `oneOf` branches collapse to a boolean,
 and other affected `oneOf` branches are presented as `anyOf` to retain branch

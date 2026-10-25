@@ -1,3 +1,8 @@
+import {
+  nativeAddressListSchema,
+  nativeObservationSourceSchemas,
+} from "../domain/native/nativeObservation.js";
+import { nativeObservationSummaryViewResultSchemas } from "../domain/analysisView/analysisView.js";
 import { literalFeatureMatchSchema } from "../domain/native/literalFeatureMatch.js";
 import { byteEntropySchema } from "../domain/native/byteEntropy.js";
 import {
@@ -5,6 +10,7 @@ import {
   nativeFunctionMatchingSummaryViewResultSchema,
   nativeFunctionSummaryViewResultSchema,
   nativeInventorySummaryViewResultSchema,
+  nativeLoadImageSummaryViewResultSchema,
   artifactInventorySummaryViewResultSchema,
   interfaceBuilderSummaryViewResultSchema,
   machoSummaryViewResultSchema,
@@ -87,10 +93,8 @@ import { relationshipCoverageSchema } from "../domain/relationshipCoverage.js";
 import { nativeDispatchMetadataResultSchema } from "../domain/native/objcSwiftMetadata.js";
 import { nativeInvestigationTraceSchema } from "../domain/native/nativeInvestigationGraph.js";
 import {
-  addressList,
   addressedEntry,
   functionDossierOutput,
-  graphNode,
   lifecycleResultOf,
   nullableText,
   procedureInfoOutput,
@@ -130,7 +134,10 @@ const bookmarkFacetSchema = z.discriminatedUnion("state", [
 export const officialOutputSchemas: Readonly<Record<string, z.ZodObject>> = {
   search_bytes: evidenceResultOf(byteSearchResultSchema),
   annotate_native_function: evidenceResultOf(nativeFunctionAnnotationsSchema),
-  inspect_native_load_image: evidenceResultOf(nativeLoadImageSchema),
+  inspect_native_load_image: analysisDetailOutputSchemaOf(
+    nativeLoadImageSchema,
+    nativeLoadImageSummaryViewResultSchema,
+  ),
   inspect_native_data_type: evidenceResultOf(nativeDataTypeSchema),
   inspect_native_instruction: evidenceResultOf(nativeInstructionSchema),
   resolve_native_call_targets: evidenceResultOf(nativeCallTargetsSchema),
@@ -164,10 +171,19 @@ export const officialOutputSchemas: Readonly<Record<string, z.ZodObject>> = {
   ),
   next_address: evidenceResultOf(z.string()),
   prev_address: evidenceResultOf(z.string()),
-  procedure_address: evidenceResultOf(z.string()),
+  procedure_address: analysisDetailOutputSchemaOf(
+    nativeObservationSourceSchemas.procedure_address,
+    nativeObservationSummaryViewResultSchemas.procedure_address,
+  ),
   procedure_assembly: evidenceResultOf(z.string()),
-  procedure_callees: evidenceResultOf(addressList),
-  procedure_callers: evidenceResultOf(addressList),
+  procedure_callees: analysisDetailOutputSchemaOf(
+    nativeObservationSourceSchemas.procedure_callees,
+    nativeObservationSummaryViewResultSchemas.procedure_callees,
+  ),
+  procedure_callers: analysisDetailOutputSchemaOf(
+    nativeObservationSourceSchemas.procedure_callers,
+    nativeObservationSummaryViewResultSchemas.procedure_callers,
+  ),
   procedure_info: procedureInfoOutput,
   read_function_instructions: evidenceResultOf(functionInstructionWindowSchema),
   read_bytes: evidenceResultOf(nativeByteReadSchema),
@@ -209,8 +225,9 @@ export const officialOutputSchemas: Readonly<Record<string, z.ZodObject>> = {
     }),
   ),
   procedure_pseudo_code: evidenceResultOf(nullableText),
-  resolve_containing_procedure: evidenceResultOf(
-    containingProcedureResolutionSchema,
+  resolve_containing_procedure: analysisDetailOutputSchemaOf(
+    nativeObservationSourceSchemas.resolve_containing_procedure,
+    nativeObservationSummaryViewResultSchemas.resolve_containing_procedure,
   ),
   search_procedures: analysisDetailOutputSchemaOf(
     nativeInventoryRowsSchemas.names,
@@ -231,7 +248,7 @@ export const officialOutputSchemas: Readonly<Record<string, z.ZodObject>> = {
   set_comment: evidenceResultOf(z.boolean()),
   set_inline_comment: evidenceResultOf(z.boolean()),
   unset_bookmark: evidenceResultOf(z.boolean()),
-  xrefs: evidenceResultOf(addressList),
+  xrefs: evidenceResultOf(nativeAddressListSchema),
 };
 
 const literalTraceOutput = evidenceResultOf(
@@ -341,11 +358,9 @@ export const enhancedOutputSchemas: Readonly<Record<string, z.ZodObject>> = {
       failed: z.int().min(0),
     }),
   ),
-  get_call_graph: evidenceResultOf(
-    z.strictObject({
-      graph: z.record(z.string(), z.array(graphNode)),
-      limitations: z.array(z.string()),
-    }),
+  get_call_graph: analysisDetailOutputSchemaOf(
+    nativeObservationSourceSchemas.get_call_graph,
+    nativeObservationSummaryViewResultSchemas.get_call_graph,
   ),
   analyze_swift_types: evidenceResultOf(
     z.object({
@@ -377,7 +392,7 @@ export const enhancedOutputSchemas: Readonly<Record<string, z.ZodObject>> = {
         status: z.literal("resolved"),
         name: z.string(),
         address: z.string(),
-        xrefs: addressList,
+        xrefs: nativeAddressListSchema,
       }),
       z.object({
         status: z.literal("unresolved"),
