@@ -20,6 +20,7 @@ import { readElfFixedHeader } from "./elfFixedHeader.js";
 import {
   mzWindowsHeaderLayoutLimitation,
   parseMzHeaderEvidence,
+  type MzHeaderEvidence,
   type MzWindowsHeaderSignatureEvidence,
 } from "./dosMz.js";
 import { decodePeMachine, readPeOptionalHeader } from "./peMachine.js";
@@ -102,9 +103,7 @@ export const claimsExecutableHeader = (
 ): boolean =>
   (bytes.length >= 4 &&
     (bytes.subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46])) ||
-      [0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe].includes(
-        bytes.readUInt32BE(0),
-      ))) ||
+      readMachoHeaderPrefixFacts(bytes).format !== null)) ||
   (bytes.length >= 2 && bytes[0] === 0x4d && bytes[1] === 0x5a) ||
   readFatContainerHeader(bytes, fileSize).state !== "not-fat";
 
@@ -126,10 +125,12 @@ export const parseExecutableHeader = (
   )
     return parseElf(bytes, fileSize);
   if (bytes.length >= 2 && bytes[0] === 0x4d && bytes[1] === 0x5a)
-    return parseMz(bytes, fileSize, mzWindowsHeaderSignature);
+    return parseMzExecutableMetadata(
+      bytes,
+      parseMzHeaderEvidence(bytes, fileSize, mzWindowsHeaderSignature),
+    );
   if (bytes.length < 8) return err("truncated or unsupported binary header");
-  const magic = bytes.readUInt32BE(0);
-  if ([0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe].includes(magic))
+  if (readMachoHeaderPrefixFacts(bytes).format !== null)
     return parseThinMachO(bytes, fileSize);
   const fatHeader =
     fatEvidence?.header ?? readFatContainerHeader(bytes, fileSize);
@@ -434,12 +435,11 @@ const parseElf = (
   });
 };
 
-const parseMz = (
+/** Select executable metadata from the reader's completed MZ observations. */
+export const parseMzExecutableMetadata = (
   bytes: Buffer,
-  fileSize: number,
-  signatureAtOffset?: MzWindowsHeaderSignatureEvidence,
+  evidence: MzHeaderEvidence,
 ): Result<ExecutableMetadata, string> => {
-  const evidence = parseMzHeaderEvidence(bytes, fileSize, signatureAtOffset);
   const { windowsHeader } = evidence;
   if (
     windowsHeader.state === "header-needed" ||

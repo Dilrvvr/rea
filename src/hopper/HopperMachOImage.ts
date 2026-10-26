@@ -33,6 +33,7 @@ import {
 import { err, ok, type Result } from "../domain/result.js";
 import { OwnedFileHandle } from "../filesystem/OwnedFileHandle.js";
 import { readFileHandleChunks } from "../filesystem/readFileHandleChunks.js";
+import { readFileHandleRange } from "../filesystem/readFileHandleRange.js";
 
 import {
   copyHopperSource,
@@ -280,16 +281,17 @@ const inspectHopperMachOImage = async (
         cause === undefined ? undefined : { cause },
       ),
     );
-  const read = async (offset: number, length: number): Promise<Buffer> => {
-    const bytes = Buffer.alloc(length);
-    const { bytesRead } = await file.read(bytes, 0, length, offset);
-    return bytes.subarray(0, bytesRead);
-  };
+  const read = (offset: number, length: number): Promise<Buffer> =>
+    readFileHandleRange(file, offset, length, () => {
+      if (signal?.aborted)
+        throw new AnalysisCancelledError("open_binary", {
+          cause: signal.reason,
+        });
+    });
   const header = await read(0, 8);
   const fatPrefix = readFatHeaderPrefix(header);
-  const magic =
-    header.length === 8 && fatPrefix.state !== "unknown" ? fatPrefix.magic : 0;
-  if ([0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe].includes(magic)) {
+  const thinPrefix = readMachoHeaderPrefixFacts(header);
+  if (header.length === 8 && thinPrefix.format !== null) {
     if (target.format !== "mach-o")
       return invalid("Thin Mach-O source disagrees with its admitted format");
     const prefix = Buffer.alloc(12);
@@ -330,7 +332,7 @@ const inspectHopperMachOImage = async (
         `Thin Mach-O source changed after target admission: expected SHA-256 ${target.sha256}, observed ${observedSha256}`,
       );
     const facts = readMachoHeaderPrefixFacts(prefix);
-    if (facts.magic !== magic || facts.identity === null)
+    if (facts.magic !== thinPrefix.magic || facts.identity === null)
       return invalid("Thin Mach-O header changed during profile resolution");
     return ok({
       method: "thin_verified_copy",
