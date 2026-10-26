@@ -1,4 +1,8 @@
-import { MachoLoadCommandCursor } from "../../domain/apple/machoLoadCommands.js";
+import { readMachoSegmentHeader } from "../../domain/apple/machoSegmentHeader.js";
+import {
+  MachoLoadCommandCursor,
+  readMachoHeaderDeclarations,
+} from "../../domain/apple/machoLoadCommands.js";
 import {
   MAX_JVM_CLASS_IDENTITY_BYTES,
   JVM_CLASS_IDENTITY_LIMIT_REASON,
@@ -20,7 +24,6 @@ import {
   classifyFatContainerIdentity,
   readFatContainerHeader,
   readFatSliceDeclarations,
-  readMachoHeaderPrefixFacts,
   validateFatSlice,
   validateFatSliceIdentity,
   type FatSliceDeclaration,
@@ -311,24 +314,13 @@ const readSlice = async (
     readonly alignmentExponent: number;
   } | null = null,
 ): Promise<MachoSlice> => {
-  const header = viewOf(await readExact(readAt, base, 28, "Mach-O header"));
-  const headerBytes = new Uint8Array(
-    header.buffer,
-    header.byteOffset,
-    header.byteLength,
-  );
-  const identity = readMachoHeaderPrefixFacts(headerBytes).identity;
-  const magic = header.getUint32(0, true);
-  if (magic === MH_MAGIC_64 || magic === MH_MAGIC) {
-    if (identity === null)
-      throw new MachoFormatIssue(
-        "malformed",
-        `slice at offset ${base} has no Mach-O header`,
-      );
-    const wide = magic === MH_MAGIC_64;
-    const headerSize = wide ? 32 : 28;
-    const commandCount = header.getUint32(16, true);
-    const commandBytes = header.getUint32(20, true);
+  const header = await readExact(readAt, base, 28, "Mach-O header");
+  const parsed = readMachoHeaderDeclarations(header, length);
+  if (!parsed.ok)
+    throw new MachoFormatIssue("malformed", "Mach-O header is truncated");
+  if (parsed.value !== null && parsed.value.littleEndian) {
+    const { wide, headerSize, commandCount, commandBytes, fileType, identity } =
+      parsed.value;
     if (commandBytes > MAX_LOAD_COMMAND_BYTES)
       throw new MachoFormatIssue(
         "unsupported",
@@ -349,7 +341,7 @@ const readSlice = async (
       wide,
       cpuType: identity.cpuType,
       cpuSubtype: identity.cpuSubtype,
-      fileType: header.getUint32(12, true),
+      fileType,
       commandCount,
       sliceOffset: base,
       sliceSize: length,
@@ -372,10 +364,10 @@ const readSlice = async (
     return slice;
   }
   throw new MachoFormatIssue(
-    magic === swap(MH_MAGIC) || magic === swap(MH_MAGIC_64)
+    parsed.value !== null && !parsed.value.littleEndian
       ? "unsupported"
       : "malformed",
-    magic === swap(MH_MAGIC) || magic === swap(MH_MAGIC_64)
+    parsed.value !== null && !parsed.value.littleEndian
       ? "big-endian Mach-O slices are not supported"
       : `slice at offset ${base} has no Mach-O header`,
   );
@@ -504,20 +496,16 @@ const readSegmentSpan = (
   body: Uint8Array,
   wide: boolean,
 ): SegmentSpan | undefined => {
-  if (body.byteLength < (wide ? 72 : 56)) return undefined;
-  const view = viewOf(body);
-  const nameBytes = body.subarray(8, 24);
+  const parsed = readMachoSegmentHeader(body, wide, true);
+  if (!parsed.ok) return undefined;
+  const { nameBytes, address: vmaddr, memorySize: vmsize } = parsed.value;
   const end = nameBytes.indexOf(0);
   return {
     name: new TextDecoder("utf-8", { fatal: false }).decode(
       end < 0 ? nameBytes : nameBytes.subarray(0, end),
     ),
-    vmaddr: wide
-      ? view.getBigUint64(24, true)
-      : BigInt(view.getUint32(24, true)),
-    vmsize: wide
-      ? view.getBigUint64(32, true)
-      : BigInt(view.getUint32(28, true)),
+    vmaddr,
+    vmsize,
   };
 };
 
@@ -1023,13 +1011,6 @@ const fileTypeName = (fileType: number): MachoSlice["file_type"] =>
 
 const version = (value: number): string =>
   `${value >>> 16}.${(value >>> 8) & 0xff}.${value & 0xff}`;
-
-const swap = (value: number): number =>
-  (((value & 0xff) << 24) |
-    ((value & 0xff00) << 8) |
-    ((value >>> 8) & 0xff00) |
-    (value >>> 24)) >>>
-  0;
 
 const viewOf = (bytes: Uint8Array): DataView =>
   new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);

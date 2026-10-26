@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from "node:util";
+import { authenticateParsedEvidenceBundle } from "../../dist/domain/evidenceBundle.js";
 import { analysisErrorProjectionSchema } from "../../dist/contracts/errorSchemas.js";
 import { toolContract } from "../../dist/contracts/toolContracts.js";
 import {
@@ -26,7 +28,12 @@ export const requireMcpToolError = (result) => {
   return analysisErrorProjectionSchema.parse(jsonValue(result).error);
 };
 
-const requireOutput = (result, operation, contract) => {
+/** Validate the complete output against its exact named contract, retaining inline Evidence. */
+export const requireMcpOutput = (
+  result,
+  operation,
+  contract = toolContract(operation),
+) => {
   if (result.isError === true)
     throw new Error(`${operation} failed: ${mcpTextValue(result)}`);
   if (contract.name !== operation)
@@ -94,7 +101,7 @@ export const requireMcpEvidenceResult = (result, operation) => {
   const contract = toolContract(operation);
   if (operationResultKey(contract) !== "normalized_result")
     throw new Error(`${operation} requires the lifecycle result extractor`);
-  return requireOutput(result, operation, contract).normalized_result;
+  return requireMcpOutput(result, operation, contract).normalized_result;
 };
 
 /** Validate a lifecycle tool output and return its operation result. */
@@ -102,10 +109,31 @@ export const requireMcpLifecycleResult = (result, operation) => {
   const contract = toolContract(operation);
   if (operationResultKey(contract) !== "result")
     throw new Error(`${operation} requires the Evidence result extractor`);
-  const projected = requireOutput(result, operation, contract).result;
+  const projected = requireMcpOutput(result, operation, contract).result;
   return operation === "binary_session"
     ? expandMcpSessionStatus(projected)
     : projected;
+};
+
+/** Require an authenticated complete bundle without changing summary-capable readers. */
+export const requireMcpEvidenceBundle = (result) => {
+  const operation = "get_evidence_bundle";
+  const contract = toolContract(operation);
+  const bundle = requireMcpOutput(result, operation, contract).result;
+  if (bundle.kind === "evidence-bundle-summary")
+    throw new Error(
+      "get_evidence_bundle returned summary metadata instead of complete Evidence",
+    );
+  if (result.structuredContent !== undefined) {
+    const structured = contract.outputSchema.parse(
+      result.structuredContent,
+    ).result;
+    if (!isDeepStrictEqual(bundle, structured))
+      throw new Error(
+        "get_evidence_bundle text and structured results disagree",
+      );
+  }
+  return authenticateParsedEvidenceBundle(bundle);
 };
 
 /** Project a mixed verifier call using its exact named canonical output schema. */
@@ -115,7 +143,7 @@ export const requireMcpOperationResult = (
   contract = toolContract(operation),
 ) => {
   const key = operationResultKey(contract);
-  const projected = requireOutput(result, operation, contract)[key];
+  const projected = requireMcpOutput(result, operation, contract)[key];
   return operation === "binary_session"
     ? expandMcpSessionStatus(projected)
     : projected;

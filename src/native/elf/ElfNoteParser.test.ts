@@ -617,3 +617,32 @@ it("fails when the entry budget is exhausted", () => {
     ),
   ).toThrow(ArtifactReaderFailure);
 });
+
+it("keeps unsafe table offsets ahead of unsupported extended numbering", () => {
+  const bytes = elfExtendedSectionCountFixture();
+  bytes.writeBigUInt64LE(0xffffffffffffffffn, 32);
+  expect(() => parse(bytes)).toThrow(
+    "ELF offset or size exceeds a safe integer.",
+  );
+});
+
+it("does not apply note precision admission to unrelated program records", () => {
+  const bytes = elf64({ phoff: 64, phnum: 1 }, Buffer.alloc(56));
+  bytes.writeUInt32LE(0x70000001, 64);
+  for (const relative of [8, 16, 24, 32, 40, 48])
+    bytes.writeBigUInt64LE(0xffffffffffffffffn, 64 + relative);
+  expect(parse(bytes).tables).toEqual([]);
+  bytes.writeUInt32LE(4, 64);
+  expect(() => parse(bytes)).toThrow(
+    "ELF offset or size exceeds a safe integer.",
+  );
+});
+
+it("keeps compressed-note refusal ahead of alignment precision admission", () => {
+  const bytes = compressedElfNoteSectionFixture();
+  const sectionTable = Number(bytes.readBigUInt64LE(40));
+  bytes.writeBigUInt64LE(0xffffffffffffffffn, sectionTable + 64 + 48);
+  expect(() => parse(bytes)).toThrow(
+    "Compressed ELF note sections are unsupported",
+  );
+});

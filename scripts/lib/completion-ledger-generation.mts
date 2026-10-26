@@ -1,18 +1,22 @@
 import { z } from "zod";
 
-import { digestCanonicalValue } from "./canonicalDigest.js";
-import { IDENTIFIER_PATTERN } from "./stringPatterns.js";
+import { digestCanonicalValue } from "../../src/domain/canonicalDigest.js";
+import { IDENTIFIER_PATTERN } from "../../src/domain/stringPatterns.js";
+import { utcDateTimeSchema } from "../../src/domain/offsetDateTime.js";
 import {
   compareAsciiStrings,
   isSortedUniqueAscii,
-} from "./canonicalOrdering.js";
+} from "../../src/domain/canonicalOrdering.js";
 
 import {
   createEvidenceCompletionLedger,
   evidenceCompletionRecordSchema,
   type EvidenceCompletionLedger,
-} from "./evidenceCompletionLedger.js";
-import { digestSchema, prefixedDigestSchema } from "./../domain/digests.js";
+} from "../../src/domain/evidenceCompletionLedger.js";
+import {
+  digestSchema,
+  prefixedDigestSchema,
+} from "../../src/domain/digests.js";
 
 const identifierSchema = z.string().regex(IDENTIFIER_PATTERN);
 const identitySchema = z.strictObject({
@@ -41,7 +45,7 @@ const verifierRunSchema = z
     process_lineage: z.discriminatedUnion("status", [
       z.strictObject({
         status: z.literal("verified"),
-        observed_at: z.iso.datetime(),
+        observed_at: utcDateTimeSchema,
         launcher_pid: z.int().positive(),
         launcher_parent_pid: z.int().nonnegative(),
         process_group_id: z.int().positive(),
@@ -55,7 +59,7 @@ const verifierRunSchema = z
       }),
       z.strictObject({
         status: z.literal("unavailable"),
-        observed_at: z.iso.datetime(),
+        observed_at: utcDateTimeSchema,
         launcher_pid: z.int().positive(),
         launcher_parent_pid: z.int().nonnegative(),
         process_group_id: z.int().positive().nullable(),

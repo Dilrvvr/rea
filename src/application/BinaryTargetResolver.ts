@@ -1,3 +1,4 @@
+import { readPeCoffHeader } from "../domain/peCoffHeader.js";
 import {
   regularFileCancellation,
   RegularFileCleanupFailure,
@@ -79,8 +80,9 @@ import {
   parseCodeViewData,
   claimsExecutableHeader,
   parseExecutableHeader,
-  parsePeRecord,
+  parsePeRecordFacts,
   peDebugDirectoryEntry,
+  peCodeViewDataRanges,
   peRvaToFileOffset,
   type ExecutableMetadata,
 } from "../domain/binaryTarget.js";
@@ -1285,9 +1287,11 @@ const readPeMetadata = async (
     return err("invalid Windows new-header signature in MZ image");
   if (["NE", "LE", "LX"].includes(windowsHeader.signature))
     return err(`unsupported ${windowsHeader.signature} executable in MZ image`);
-  const optionalHeaderSize = fileHeader.readUInt16LE(20);
+  const coff = readPeCoffHeader(fileHeader.subarray(4));
+  if (!coff.ok) return err("invalid or truncated PE header");
+  const optionalHeaderSize = coff.value.optionalHeaderSize;
   if (optionalHeaderSize > 4096) return err("invalid PE optional header size");
-  const numberOfSections = fileHeader.readUInt16LE(6);
+  const numberOfSections = coff.value.sectionCount;
   const record = Buffer.alloc(24 + optionalHeaderSize);
   const recordRead = await handle.read(record, 0, record.length, offset);
   throwIfTargetResolutionCancelled(signal);
@@ -1301,7 +1305,8 @@ const readPeMetadata = async (
     optionalHeaderSize,
     signal,
   );
-  return parsePeRecord(record, codeView);
+  const parsed = parsePeRecordFacts(record, codeView);
+  return parsed.ok ? ok(parsed.value.metadata) : parsed;
 };
 
 const readPeCodeView = async (
@@ -1343,28 +1348,15 @@ const readPeCodeView = async (
     debugFileOffset,
   );
   throwIfTargetResolutionCancelled(signal);
-  const numEntries = Math.floor(debugDirRead.bytesRead / 28);
-  for (let j = 0; j < numEntries; j++) {
-    const entryOffset = j * 28;
-    const type = debugDirectoryBuffer.readUInt32LE(entryOffset + 12);
-    if (type !== 2) continue; // IMAGE_DEBUG_TYPE_CODEVIEW
-    const sizeOfData = debugDirectoryBuffer.readUInt32LE(entryOffset + 16);
-    let pointerToRawData = debugDirectoryBuffer.readUInt32LE(entryOffset + 24);
-    if (pointerToRawData === 0) {
-      const addressOfRawData = debugDirectoryBuffer.readUInt32LE(
-        entryOffset + 20,
-      );
-      const mapped = peRvaToFileOffset(
-        addressOfRawData,
-        sectionTable,
-        numberOfSections,
-        debugDir.sizeOfHeaders,
-        Math.min(sizeOfData, 4096),
-      );
-      if (mapped === undefined) continue;
-      pointerToRawData = mapped;
-    }
-    if (sizeOfData < 16) continue;
+  for (const {
+    fileOffset: pointerToRawData,
+    declaredSize: sizeOfData,
+  } of peCodeViewDataRanges(
+    debugDirectoryBuffer.subarray(0, debugDirRead.bytesRead),
+    sectionTable,
+    numberOfSections,
+    debugDir.sizeOfHeaders,
+  )) {
     const maxCodeViewRead = Math.min(sizeOfData, 4096);
     const codeViewBuffer = Buffer.alloc(maxCodeViewRead);
     const codeViewRead = await handle.read(
