@@ -1,4 +1,5 @@
 import { request, type ClientRequest, type IncomingMessage } from "node:http";
+import { isUtf8 } from "node:buffer";
 
 import { z } from "zod";
 
@@ -16,6 +17,7 @@ import { urlDeclaresQueryOrFragment } from "../domain/urlComponents.js";
 import { safeParseJson } from "../domain/safeJson.js";
 import { WEB_RUNTIME_LIMITS } from "../domain/webRuntime.js";
 import type { CdpConnection } from "./CdpConnection.js";
+import { recordValue } from "./CdpCaptureValues.js";
 import {
   parseCdpDiscoveryTargets,
   type CdpDiscoveryTarget,
@@ -71,10 +73,6 @@ const browserSocketVersionSchema = z.object({
   revision: z.string(),
   userAgent: z.string(),
   jsVersion: z.string(),
-});
-
-const browserSocketTargetsSchema = z.object({
-  targetInfos: z.array(z.unknown()),
 });
 
 /** Validated direct CDP WebSocket bound to one discovered page target. */
@@ -158,7 +156,7 @@ export const discoverCdpEndpoint = async (
       type: target.type,
       title: sanitizeTargetTitle(target.title, target.url),
       url: target.url,
-      attached: target.attached ?? null,
+      attached: target.attached,
       ...targetWebSocket(endpoint, target, operation),
     })),
   };
@@ -247,19 +245,14 @@ export const discoverCdpBrowserSocket = async (
     versionInput,
     operation,
   );
-  const targets = parseCdpEndpointValue(
-    browserSocketTargetsSchema,
-    targetsInput,
+  const { targets, limitations, ambiguousTargetIds } = parseCdpDiscoveryTargets(
+    recordValue(targetsInput)?.targetInfos,
     operation,
-  );
-  const parsedTargets = parseCdpDiscoveryTargets(
-    targets.targetInfos,
-    operation,
-    "CDP Target.getTargets",
+    "browser-socket",
   );
   return {
-    limitations: parsedTargets.limitations,
-    ambiguousTargetIds: parsedTargets.ambiguousTargetIds,
+    limitations,
+    ambiguousTargetIds,
     webSocket: { scope: "browser", url },
     version: {
       product: version.product,
@@ -268,12 +261,12 @@ export const discoverCdpBrowserSocket = async (
       user_agent: version.userAgent,
       js_version: version.jsVersion,
     },
-    targets: parsedTargets.targets.map((target) => ({
+    targets: targets.map((target) => ({
       id: target.id,
       type: target.type,
       title: sanitizeTargetTitle(target.title, target.url),
       url: target.url,
-      attached: target.attached ?? null,
+      attached: target.attached,
     })),
   };
 };
@@ -523,9 +516,17 @@ export const readCdpJson = async (
         });
         received.on("end", () => {
           if (settled) return;
-          const parsed = safeParseJson(
-            Buffer.concat(chunks, bytes).toString("utf8"),
-          );
+          const body = Buffer.concat(chunks, bytes);
+          if (!isUtf8(body)) {
+            finish(
+              new BrowserObservationError(
+                operation,
+                "invalid_endpoint_response",
+              ),
+            );
+            return;
+          }
+          const parsed = safeParseJson(body.toString("utf8"));
           if (!parsed.ok) {
             finish(
               new BrowserObservationError(
