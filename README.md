@@ -83,7 +83,10 @@ npx rea-agents setup
 
 Choose your agents, review the proposed changes, and approve them. Setup adds
 REA's MCP server and matching workflow instructions, with backups of existing
-configuration. Restart your agent afterward.
+configuration. Restart your agent afterward. Setup records the selected runtime and REA
+entry script directly. If acquired through a package runner, keep its cache entry
+available. Run package acquisition from a trusted directory outside the target
+project. Installation and recovery details are in the setup guide below.
 
 Setup supports Claude Code, Codex, Cursor, Gemini CLI, Grok Build and
 [other agents](docs/installation.md#supported-agents). See
@@ -425,7 +428,7 @@ Report vulnerabilities through [SECURITY.md](SECURITY.md).
 
 ## Star history
 
-🎉 **300,000 GitHub stars — thank you!**
+🎉 **400,000 GitHub stars — thank you!**
 
 Thanks to everyone using REA, reporting bugs, requesting features, testing builds, and contributing fixes.
 
