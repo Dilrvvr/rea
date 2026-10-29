@@ -591,6 +591,7 @@ const requireExtractableFormat = async (
     format !== "intel-hex" &&
     format !== "srec" &&
     format !== "esp-image" &&
+    format !== "fit" &&
     format !== "mach-o-universal" &&
     !isZipPackageFormat(format)
   ) {
@@ -604,7 +605,9 @@ const requireExtractableFormat = async (
           (await probes.godotPck()) !== undefined ||
           ((format === "elf" || format === "pe" || format === "mach-o") &&
             ((await probes.nodeSea()) !== undefined ||
-              (await probes.pyInstaller()) !== undefined));
+              (await probes.pyInstaller()) !== undefined ||
+              (await probes.bunStandalone()).status === "present" ||
+              (await probes.dotnetBundle()) !== undefined));
         if (pack && input.expectedRootSha256 !== undefined) {
           const digest = await hashStableRootArtifactHandle(
             path,

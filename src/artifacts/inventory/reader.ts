@@ -1,6 +1,4 @@
-import type { GodotPckAdmission } from "../GodotPckLocation.js";
-import type { PyInstallerAdmission } from "../pyinstaller/PyInstallerAdmission.js";
-import type { NodeSeaAdmission } from "../nodeSea/NodeSeaAdmission.js";
+import type { ArtifactReaderAdmission } from "../ArtifactReaderAdmission.js";
 import type { AsarHeaderAdmission } from "../../config/asarHeaderAdmission.js";
 import type {
   ArtifactReader,
@@ -15,18 +13,13 @@ import {
   isZipPackageFormat,
   ZIP_NON_ENTRY_LIMITATION,
 } from "../../domain/zipPackageFormat.js";
-import type { StableRegularFileDescriptor } from "../../filesystem/RegularFile.js";
 import { ESP_IMAGE_LIMITATIONS } from "../../domain/firmware/espImageFacts.js";
 
 export const createReader = (
   path: string,
   format: ArtifactOccurrence["artifact_format"],
   environment: Readonly<NodeJS.ProcessEnv>,
-  readerAdmission?:
-    | StableRegularFileDescriptor
-    | NodeSeaAdmission
-    | PyInstallerAdmission
-    | GodotPckAdmission,
+  readerAdmission?: ArtifactReaderAdmission,
   asarHeaderAdmission?: AsarHeaderAdmission,
   selectedPath?: string,
 ): ArtifactReader | undefined => {
@@ -88,6 +81,11 @@ export const inventoryCoverage = (
               "uImage inventory establishes the 64-byte legacy header facts and stored payload bytes. Compressed payloads are not decompressed, and the image is not executed.",
             ]
           : []),
+        ...(reader.format === "fit"
+          ? [
+              "FIT inventory reports each /images node's stored bytes and its declared type, architecture, OS, compression, load and entry. Image data is not decompressed or decrypted, signatures are not verified, nothing is executed, and load and entry addresses are declarations.",
+            ]
+          : []),
         ...traversal.limitations,
       ],
     };
@@ -110,13 +108,15 @@ export const inventoryCoverage = (
     isZipPackageFormat(format) ||
     format === "directory" ||
     format === "asar" ||
+    format === "bun-standalone" ||
     format === "godot-pck" ||
     format === "unityfs" ||
     format === "uimage" ||
     format === "node-sea" ||
     format === "intel-hex" ||
     format === "srec" ||
-    format === "esp-image"
+    format === "esp-image" ||
+    format === "fit"
   )
     return {
       coverage: { scope: "container-entries", status: "unknown" },

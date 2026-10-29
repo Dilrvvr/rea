@@ -3,6 +3,7 @@ import {
   ghidraProgramNameSchema,
 } from "./ghidraExistingProject.js";
 import { z } from "zod";
+import { mcpInputBudgetSchema } from "./mcpInputBudget.js";
 import { isAbsolute } from "node:path";
 
 import { ConfigurationError } from "../domain/configurationErrors.js";
@@ -20,6 +21,7 @@ import {
 } from "./providerStartupTimeout.js";
 import {
   DEFAULT_GHIDRA_STARTUP_TIMEOUT_MS,
+  DEFAULT_HOPPER_CALLER_SCAN_BUDGET_MS,
   DEFAULT_HOPPER_STARTUP_TIMEOUT_MS,
 } from "../domain/analysisResourceLimits.js";
 import { mcpInputSchemaProfileSchema } from "./mcpInputSchemaProfile.js";
@@ -45,6 +47,7 @@ const environmentSchema = z.object({
   REA_ANALYSIS_PROVIDER: analysisProviderSelectorSchema.default("auto"),
   REA_BRIDGE_MAX_REQUEST_BYTES: bridgeMaxRequestBytesSchema.optional(),
   REA_MCP_MAX_RESPONSE_BYTES: mcpResponseBudgetSchema.optional(),
+  REA_MCP_MAX_INPUT_ELEMENTS: mcpInputBudgetSchema.optional(),
   REA_ASAR_MAX_HEADER_BYTES: asarMaxHeaderBytesSchema.optional(),
   REA_CAPTURE_DECODER_OLD_GENERATION_MIB:
     captureDecoderOldGenerationMiBSchema.optional(),
@@ -97,6 +100,9 @@ const environmentSchema = z.object({
   ),
   REA_HOPPER_STARTUP_TIMEOUT_MS: providerStartupTimeoutSchema.default(
     DEFAULT_HOPPER_STARTUP_TIMEOUT_MS,
+  ),
+  REA_HOPPER_CALLER_SCAN_BUDGET_MS: providerStartupTimeoutSchema.default(
+    DEFAULT_HOPPER_CALLER_SCAN_BUDGET_MS,
   ),
   REA_SWIFTC_COMPILE_TIMEOUT_MS: providerStartupTimeoutSchema.default(
     DEFAULT_SWIFTC_COMPILE_TIMEOUT_MS,

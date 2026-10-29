@@ -56,6 +56,8 @@ const artifactKindSchema = z.enum([
 
 /** Recognized storage or application formats; unknown bytes remain explicit. */
 const artifactFormatSchema = z.enum([
+  "dotnet-bundle",
+  "bun-standalone",
   "dmg",
   "zip",
   "pkg",
@@ -91,6 +93,7 @@ const artifactFormatSchema = z.enum([
   "intel-hex",
   "srec",
   "esp-image",
+  "fit",
   "unknown",
 ]);
 
@@ -103,6 +106,7 @@ const artifactContentFormatSchema = artifactFormatSchema.extract([
   "intel-hex",
   "srec",
   "esp-image",
+  "fit",
   "mach-o-universal",
   "mach-o",
   "elf",
