@@ -218,6 +218,12 @@ Malformed provider replies return `unreadable_output` for
 `resolve_containing_procedure` before successful-result projection;
 cancellation and incomplete cleanup remain errors.
 
+For a procedure match, `procedure_references` with `direction: "incoming"` can
+provide the selected provider's reference kinds when supported. Its scope covers
+the procedure body, so compare target addresses when selecting references to the
+exact entry. It is a separate observation and does not establish runtime use or
+complete reference discovery.
+
 REA prepares complete MCP results within the pinned stdio client's 10 MiB
 receive-buffer budget, including both text and structured representations and
 room for the JSON-RPC envelope. Tool errors omit `structuredContent` from the
@@ -325,6 +331,17 @@ unknown. Exhausted pages describe the recorded observations and do not establish
 complete native discovery. The same views work through the CLI with historical
 Evidence files or bundles and require no live provider.
 
+For retained `inspect_native_instruction` Evidence, use
+`view: {"kind":"native-instruction-references","collection":"incoming_references","offset":0,"limit":64}`
+to page typed references to the exact code or data address. Select `references`
+for outgoing instruction references. Rows preserve their original indices and
+provider-reported kind and provenance. `items.state` distinguishes available,
+unavailable, and not-recorded collections; coverage is null in the latter two
+cases. The fixed 1 MiB page projection allowance leaves room for Evidence and
+MCP encoding. An oversized single row remains in the complete parent, which
+can be exported. Page exhaustion describes retained rows, not discovery or
+runtime access.
+
 For oversized native function Evidence, `details.reported_limits.continuation`
 contains a ready-to-call `inspect_analysis_view` request for the retained
 pseudocode's first page. Use its `name` and `arguments` directly, then follow
@@ -388,6 +405,12 @@ is null. `total` counts all matching heads; each page preserves complete records
 in stable unknown ID order. Filters apply before paging. Pages reflect current
 session state, so keep the unknown ledger unchanged while traversing it.
 
+`list_unknowns` only lists registered heads. Import restores the Unknown records
+present in a bundle; it does not turn residual question text embedded in Evidence
+into registry entries. An empty registry therefore does not establish that
+retained Evidence has no open questions. Inspect the relevant Evidence or its
+analysis view for its residual questions.
+
 Automatically retained workflow questions include their immutable result
 Evidence ID. Distinct results retain independent questions and source links;
 repeating the same result does not create another unknown. Workflow Evidence
@@ -396,6 +419,19 @@ keep caller-selected identity and reject duplicate creation.
 Duplicate creation is a nonretryable `invalid_request`; use the existing head
 or update it with its current `expected_revision`. A stale update remains a
 retryable `revision_conflict`.
+
+If automatic question publication fails after a workflow completes,
+`details.workflow_unknown_publication` identifies the Evidence and states
+whether its retention was confirmed. `created_questions` and
+`existing_questions` count processed question occurrences; duplicate questions
+may share an Unknown identity. `total_questions` counts string questions, and
+`next_question_index` is the zero-based position in the workflow's original
+`residual_unknowns` array where publication stopped. It is not a resume token.
+For a retained record on the same MCP connection, retrieve the Evidence by ID
+with `get_evidence_bundle` and inspect committed heads with `list_unknowns`.
+Unprocessed questions remain in the completed Evidence; they were not checked
+by this attempt and may already exist from earlier work. A one-shot invocation identifies session-only retention
+as `invocation-only` and carries the completed Evidence in its failure when available.
 
 When `record_unknown` or `update_unknown` commits but its complete reply exceeds
 the response budget, `details.reported_limits.committed_unknown` identifies the
@@ -669,12 +705,19 @@ refuses the summary before analysis. Further views use the returned
 `parent_evidence_id` through `inspect_analysis_view`, or a saved Evidence file or
 portable bundle, and never repeat decompilation.
 
+A null provider observation produces `status: "unavailable"` and
+`reason: "no_pseudocode"`; item limitations retain any provider explanation.
+This does not establish why pseudocode is absent or whether a retry would help.
+Operation failures and malformed non-null output remain `status: "error"`.
+The `failed` count includes both unavailable and error items. Existing retained
+records keep their original item statuses and error details.
+
 A `batch-decompile` view selects one `collection` and repeats the batch counts
 and provider identities:
 
 - `items`: rows in retained order with their original `index`, so duplicate
   selectors stay distinct. A row keeps the selector in `address`, its `procedure`
-  identity and `status`, plus `pseudocode_code_units` or its exact `error` and
+  identity and `status`, plus `pseudocode_code_units`, an unavailable `reason`, or its exact `error` and
   `limitations`. `where.indices`, `where.addresses`, `where.procedure_addresses`
   and `where.statuses` filter exactly and combine; an item with unknown identity
   never matches `procedure_addresses`. Omitted filters select all, and empty
@@ -683,11 +726,11 @@ and provider identities:
 - `pseudocode`: one `index`'s text in UTF-16 code-unit pages. `offset` and `limit`
   default to 0 and 16,384, and `coverage` measures that body. An offset inside a
   surrogate pair is refused, and a limit ending inside one stops before it. An
-  error item has no text and is refused with a pointer to `items`.
+  unavailable or error item has no text and is refused with a pointer to `items`.
 
 Page `coverage` counts the selection only: exhausting it establishes nothing
 about functions outside the batch. Evidence `limitations` aggregate every item's
-provider observations and are not attributed to one successful item; only error
+provider observations and are not attributed to one successful item; unavailable and error
 items keep their own. A page over the response budget offers a smaller selection
 from the same `source`: fewer rows, or one body's `pseudocode` pages when a single
 row does not fit. An inline source offers none, because the record cannot be
@@ -956,6 +999,15 @@ concrete version, selection source, and complete analysis profile through
 `analysis_provider_binding`. Ambiguity and unknown, unavailable, or unsupported
 choices return typed selection details. A selected provider is never replaced
 automatically after a runtime failure.
+
+When an admitted `open_binary` attempt fails, `error.details.selection_at_failure`
+records the canonical binary path and SHA-256, resource root (including its
+caller-selected path), or absence of selection at
+the end of that serialized attempt. This is a past observation: a queued or
+later operation may already have changed the selection. No selection does not
+establish that cleanup is complete. Call `binary_session` for current state
+and cleanup status. Validation failures that do not enter the session have no
+such receipt. The original error and any cleanup recovery remain authoritative.
 
 `open_binary` resolves an Apple bundle directory (`.app`, `.appex`,
 `.framework`, `.xpc`, `.systemextension`, `.bundle` or `.plugin`, compared
