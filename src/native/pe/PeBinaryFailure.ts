@@ -4,14 +4,12 @@ import {
   stableArtifactInputFailure,
   projectStableArtifactFailure,
   readerIntegrityFailure,
-} from "../../artifacts/StableArtifactFailure.js";
-import { ArtifactReaderFailure } from "../../artifacts/ArtifactReader.js";
-import type { StableArtifactSnapshot } from "../../artifacts/readStableArtifact.js";
-import {
+  ArtifactReaderFailure,
+  type StableArtifactSnapshot,
   artifactFilePrimaryFacts,
   artifactFileCancellationCause,
   type ArtifactFilePrimaryFacts,
-} from "../../artifacts/ArtifactFileOperation.js";
+} from "../../resources/index.js";
 import { AnalysisError } from "../../domain/analysisErrorBase.js";
 import {
   AnalysisResourceConstraintError,
@@ -20,7 +18,10 @@ import {
   carriedReason,
 } from "../../domain/analysisErrorCore.js";
 import { ProviderAdapterError } from "../../domain/providerAdapterError.js";
-import { BinaryResourceFailure } from "../metadata/BinaryContainer.js";
+import {
+  BinaryResourceFailure,
+  binaryResourceAllowance,
+} from "../../domain/binaryContainer.js";
 
 interface PeBinaryInput {
   readonly path: string;
@@ -30,7 +31,8 @@ interface PeBinaryFailureOptions<Limit extends string> {
   readonly operation: string;
   readonly providerId: string;
   readonly fileSizeRemediation: () => string;
-  readonly limit: (cause: BinaryResourceFailure) => Limit | null;
+  /** The allowances the parser names in its `BinaryResourceFailure`. */
+  readonly limits: readonly Limit[];
   readonly limitRecovery: (limit: Limit | null) => ResourceConstraintRecovery;
 }
 
@@ -59,7 +61,7 @@ const peBinaryFailurePrimary = <Limit extends string>(
       carriedReason(artifactFileCancellationCause(cause)),
     );
   if (cause instanceof BinaryResourceFailure) {
-    const limit = options.limit(cause);
+    const limit = binaryResourceAllowance(cause, options.limits);
     return new AnalysisResourceConstraintError(
       operation,
       "capacity",

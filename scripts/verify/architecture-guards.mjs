@@ -1,4 +1,4 @@
-import { readFile, readdir, writeFile } from "node:fs/promises";
+import { readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { recordPredicateCounts } from "./record-predicate-guard.mjs";
@@ -9,6 +9,7 @@ import {
 } from "./counted-baseline.mjs";
 import { localCompletenessEnumCount } from "./completeness-enum-guard.mjs";
 import { countKeyedFirstMatches } from "./keyed-first-match.mjs";
+import { budgetArithmeticCount } from "./budget-arithmetic-guard.mjs";
 import { localLimitErrorClassCount } from "./limit-class-guard.mjs";
 
 // Architecture guards for the strict-identity / best-effort-inference split.
@@ -72,12 +73,35 @@ check(
 
 // Prerequisite inspection lifetime is an application contract shared by adapters.
 check(
-  "provider-owned inspection lifetime (use src/application/ProviderInspectionScope)",
+  "provider-owned inspection lifetime (use src/ports/ProviderInspectionScope)",
   files,
   /providers\/ProviderInspectionScope\.js/,
 );
 
 check("NUL-joined list key (use compositeKey)", files, /\.join\(["']\\0["']\)/);
+
+// Pushed effect invalidation (docs/adr/javascript/pushed-effect-invalidation.md).
+// Opaque-effect checks are private to javascriptSemanticEffectLog.ts, so the
+// compiler keeps readers on its questions, and only the log and its record
+// module read the recorded sites. A method read on an intrinsic
+// instance asks one owner, which checks the method, the instance's prototype
+// link and the intrinsic prototypes.
+check(
+  "reader-side read of recorded opaque effects (ask javascriptSemanticEffectLog.ts or the javascriptSemanticEffectRecord.ts accessors)",
+  files,
+  /\.opaqueEffects\b/u,
+  [
+    "src/domain/javascript/javascriptSemanticEffectLog.ts",
+    "src/domain/javascript/javascriptSemanticEffectRecord.ts",
+  ],
+);
+
+check(
+  "reader-side prototype-link member check (use isIntrinsicInstanceMethodCall)",
+  files,
+  /mayObserve\([^;]*\["__proto__"\]/u,
+  ["src/domain/javascript/javascriptSemanticIntrinsicInstances.ts"],
+);
 
 check(
   "direct transparent-wrapper unwrap outside javascriptAstValues (use unwrapJavaScriptExpression)",
@@ -266,16 +290,31 @@ check(
 // Counted baselines record the remaining copies of a pattern that has one
 // owner. A file may not gain copies and a baseline may not grow; when copies
 // are removed, `--shrink-baselines` lowers the recorded counts (and never
-// raises them) so the next removal cannot be undone silently.
-const baselinePath = join(
-  root,
-  "scripts/verify/architecture-guard-baselines.json",
+// raises them) so the next removal cannot be undone silently. Each guard's
+// baseline is its own file, scripts/verify/baselines/<key>.json, so changes
+// to different guards never edit the same file.
+const baselineDirectory = join(root, "scripts/verify/baselines");
+const baselineTexts = new Map();
+for (const name of await readdir(baselineDirectory)) {
+  if (!name.endsWith(".json")) {
+    failures.push(
+      `${relative(root, join(baselineDirectory, name))} is not a guard baseline; only <guard-key>.json files belong in ${relative(root, baselineDirectory)}.`,
+    );
+    continue;
+  }
+  baselineTexts.set(
+    name.slice(0, -".json".length),
+    await readFile(join(baselineDirectory, name), "utf8"),
+  );
+}
+const baselines = Object.fromEntries(
+  [...baselineTexts].map(([key, text]) => [key, JSON.parse(text)]),
 );
-const baselineText = await readFile(baselinePath, "utf8");
-const baselines = JSON.parse(baselineText);
+const checkedBaselineKeys = new Set();
 const shrinkBaselines = process.argv.includes("--shrink-baselines");
 let baselinesShrunk = false;
 const checkCounted = (label, key, selected, pattern, owners) => {
+  checkedBaselineKeys.add(key);
   const counts = new Map();
   for (const file of selected) {
     if (owners.includes(file.path)) continue;
@@ -308,6 +347,29 @@ const checkCounted = (label, key, selected, pattern, owners) => {
     );
 };
 
+// A provider failure's captured output comes from one owner,
+// capturedProviderOutput in src/process; local copies drift on byte counts
+// (retained or written) and on how output loss marks truncation.
+checkCounted(
+  "captured output copied from a process snapshot (use capturedProviderOutput from src/process/capturedProviderOutput)",
+  "captured-output-copy",
+  files,
+  /\bstdout: [\w.]+\.stdout\.text\b/gu,
+  ["src/process/capturedProviderOutput.ts"],
+);
+
+// Pushed effect invalidation (docs/adr/javascript/pushed-effect-invalidation.md).
+// Recorded effects belong to the effect log. A reader that reads an effect
+// index itself decides on its own which effect kinds and proofs apply; new
+// readers ask the log instead, and each migrated reader lowers this count.
+checkCounted(
+  "read of a JavaScript effect index outside the effect log (ask javascriptSemanticEffectLog.ts)",
+  "javascript-effect-index-read",
+  files,
+  /\.(?:bindingWrites|memberWrites|escapedPaths|ambientWriteEffects|ambientEscapeEffects|ambientBindingWrites|ambientWrites|ambientEscapes)\b/gu,
+  ["src/domain/javascript/javascriptSemanticEffectLog.ts"],
+);
+
 // Coverage status has one vocabulary, coverageStatusSchema in
 // src/domain/coverage.ts. A local enum that contains "complete" either copies
 // it or drops `unknown`, which forces an unknown producer to pick a side.
@@ -331,13 +393,51 @@ checkCounted(
 
 // A limit a parser stopped at is a ParseFailureError<"limit"> (decodeLimit in
 // src/domain/parseFailure); a refusal is an AnalysisRefusal. A local limit
-// class on plain Error hides the limit's name and maximum from both.
+// class on plain Error hides the limit's name and maximum from both; a limit
+// subclass of BinaryResourceFailure keeps a second limit field beside the
+// allowance its LimitRef already names. The environment-state extraction's private retention stop is control flow that
+// its own entry point catches and turns into `null`; it is never reported.
 checkCounted(
-  "local limit class extending plain Error (use decodeLimit from src/domain/parseFailure or an AnalysisRefusal)",
+  "local limit class (use decodeLimit from src/domain/parseFailure, a named BinaryResourceFailure allowance, or an AnalysisRefusal)",
   "local-limit-error-class",
   files,
   localLimitErrorClassCount,
-  [],
+  ["src/domain/analysisView/EnvironmentStateExtraction.ts"],
+);
+
+// A resource allowance is charged and refunded through `Budget` in
+// src/domain/budget, which refuses malformed or oversized charges without
+// changing the remainder. Hand-written `remaining -=` / `retained +=`
+// arithmetic repeats that admission and drifts (charge-then-check, no
+// safe-integer check).
+checkCounted(
+  "hand-written budget arithmetic (use Budget from src/domain/budget)",
+  "budget-arithmetic",
+  files,
+  budgetArithmeticCount,
+  ["src/domain/budget.ts"],
+);
+
+// A slice to a named maximum drops items; boundedList in src/domain/boundedList
+// keeps the count of what it dropped beside the retained items, so a consumer
+// can say that more exist and how many.
+checkCounted(
+  "slice to a named maximum (use boundedList or BoundedListCollector from src/domain/boundedList so the omitted count travels with the items)",
+  "constant-maximum-slice",
+  files,
+  /\.slice\(\s*0\s*,\s*[A-Z][A-Z0-9_]*\s*\)/gu,
+  ["src/domain/boundedList.ts"],
+);
+
+// Display text cut with an appended ellipsis comes from ellipsisExcerpt in
+// src/domain/excerpt, which never splits a surrogate pair and marks the result
+// as excerpt text. A hand-written `${text.slice(0, n)}…` does neither.
+checkCounted(
+  "hand-written ellipsis excerpt (use ellipsisExcerpt from src/domain/excerpt)",
+  "ad-hoc-ellipsis",
+  files,
+  /\.slice\(\s*0\s*,[^)]*\)\)?\}(?:…|\.\.\.)/gu,
+  ["src/domain/excerpt.ts"],
 );
 
 // A deadline is a monotonic budget owned by `Deadline` in src/domain/deadline;
@@ -409,6 +509,21 @@ checkCounted(
   ["src/gdb/GdbMiRecord.ts"],
 );
 
+// Services name the contract field they refuse or ask the caller to change;
+// the CLI layer owns option spellings (each command's field binding renames
+// issue paths to CLI keys). A `--flag` written outside src/cli copies that
+// mapping and goes stale when the command renames the option.
+checkCounted(
+  "REA CLI option named outside the CLI layer (name the contract field; src/cli owns option spellings)",
+  "cli-option-text-outside-cli",
+  files.filter(
+    ({ path }) =>
+      !path.startsWith("src/cli/") && !/^src\/cli[^/]*\.ts$/u.test(path),
+  ),
+  /\(CLI:? [^)\n]*--[a-z]|--[a-z][a-z0-9-]* on the CLI|or (?:use|pass) --[a-z]|\bcli(?:Flag|Total|PerFile)?:\s*"--[a-z]|(?:message|userMessage):\s*["`]--[a-z]/gu,
+  [],
+);
+
 // A runtime setting view throws the ConfigurationError of a malformed launch
 // seed; readRuntimeSetting in src/config/runtimeAnalysisSettings.ts returns it
 // as a Result. Catching it by hand mixes it into each site's own failures.
@@ -421,7 +536,7 @@ checkCounted(
 );
 
 // Byte-format parsers read untrusted input. Bounds, truncation and failure
-// kind belong to BinaryReader (src/native/metadata/BinaryContainer.ts) and
+// kind belong to BinaryReader (src/domain/binaryContainer.ts) and
 // the ParseFailure algebra (src/domain/parseFailure.ts), not to each parser.
 const PARSER_FOLDERS = [
   "src/android/",
@@ -471,11 +586,11 @@ const parserFiles = files.filter((file) =>
 // An unchecked Buffer or DataView read throws a bare RangeError past the end,
 // which a catch site cannot tell from a host stack or string limit.
 checkCounted(
-  "raw Buffer or DataView numeric read (use BinaryReader from src/native/metadata/BinaryContainer)",
+  "raw Buffer or DataView numeric read (use BinaryReader from src/domain/binaryContainer)",
   "raw-buffer-read",
   files,
   /\.(?:read(?:Big)?U?Int(?:8|16|32|64)?(?:LE|BE)?|readBigUint64(?:LE|BE)|readUint(?:8|16|32)(?:LE|BE)?|read(?:Float|Double)(?:LE|BE)|get(?:Big)?(?:Uint|Int)(?:8|16|32|64)|getFloat(?:32|64))\(/gu,
-  ["src/native/metadata/BinaryContainer.ts"],
+  ["src/domain/binaryContainer.ts"],
 );
 
 // An input fault is a ParseFailureError; a broken internal assumption is a
@@ -598,18 +713,25 @@ checkCounted(
 // takes it from there and passes the platform or architecture on as a
 // required parameter. An ambient read elsewhere mixes the host REA runs on
 // with the host a caller asked about, and cannot be selected by a test.
+// Named imports from node:process or node:os and os.platform()/os.arch() are
+// the same read under another spelling.
+const ambientHostRead = (property, osFunction) =>
+  new RegExp(
+    String.raw`\bprocess\.${property}\b|\bos\.${osFunction}\(\)|\bimport\s*(?:type\s*)?\{[^}]*\b(?:${property}|${osFunction})\b[^}]*\}\s*from\s*["'](?:node:)?(?:process|os)["']`,
+    "gu",
+  );
 checkCounted(
   "ambient process.platform read (take HOST_PLATFORM from src/platform/HostPlatform at composition and pass the platform as a parameter)",
   "ambient-host-platform",
   files,
-  /\bprocess\.platform\b/gu,
+  ambientHostRead("platform", "platform"),
   ["src/platform/HostPlatform.ts"],
 );
 checkCounted(
   "ambient process.arch read (take HOST_PLATFORM from src/platform/HostPlatform at composition and pass the architecture as a parameter)",
   "ambient-host-architecture",
   files,
-  /\bprocess\.arch\b/gu,
+  ambientHostRead("arch", "arch"),
   ["src/platform/HostPlatform.ts"],
 );
 
@@ -691,30 +813,56 @@ const verifierScripts = await Promise.all(
       ),
     })),
 );
+// The Windows native lane tests PrivateRuntimeRoot itself: it calls
+// PrivateRuntimeRoot.create under a parent whose DELETE lease forces a sharing
+// violation and asserts the typed refusal. That call is the subject under
+// test, not a verifier root, so exactly one occurrence of that expression is
+// exempt; any other allocation in the file, including a second copy of it,
+// still counts.
+const verifierRootSubjectsUnderTest = new Map([
+  [
+    "scripts/verify-windows-native.mjs",
+    "PrivateRuntimeRoot.create({ parent: sharingParent.observation.path })",
+  ],
+]);
 checkCounted(
   "verifier fixture root allocated outside VerifierFixture (use scripts/lib/verifier-fixture.mjs)",
   "verifier-fixture-root",
-  verifierScripts,
+  verifierScripts.map((file) => {
+    const subject = verifierRootSubjectsUnderTest.get(file.path);
+    return subject === undefined
+      ? file
+      : { ...file, content: file.content.replace(subject, "") };
+  }),
   /\b(?:mkdtemp(?:Sync)?|createCanonicalTemporaryDirectory)\(|\bPrivateRuntimeRoot\.create\(/gu,
   [],
 );
 
-const baselineFile = reconcileBaselineFile(
-  baselineText,
-  baselines,
-  shrinkBaselines,
-);
-if (baselineFile.action === "write") {
-  await writeFile(baselinePath, baselineFile.text);
-  console.log(
-    baselinesShrunk
-      ? `Lowered counted baselines in ${relative(root, baselinePath)}.`
-      : `Rewrote ${relative(root, baselinePath)} in its sorted form.`,
+for (const key of baselineTexts.keys())
+  if (!checkedBaselineKeys.has(key))
+    failures.push(
+      `${relative(root, join(baselineDirectory, `${key}.json`))} names no counted guard; delete it or restore its guard.`,
+    );
+for (const key of checkedBaselineKeys) {
+  const path = join(baselineDirectory, `${key}.json`);
+  const shown = relative(root, path);
+  const baselineFile = reconcileBaselineFile(
+    baselineTexts.get(key),
+    baselines[key],
+    shrinkBaselines,
   );
-} else if (baselineFile.action === "reject")
-  failures.push(
-    `${relative(root, baselinePath)} is not in its written form (each guard's paths sorted by code unit); rewrite it with \`node scripts/verify/architecture-guards.mjs --shrink-baselines\`.`,
-  );
+  if (baselineFile.action === "write") {
+    await writeFile(path, baselineFile.text);
+    console.log(`Rewrote ${shown}.`);
+  } else if (baselineFile.action === "delete") {
+    await rm(path);
+    console.log(`Removed ${shown}; its guard has no remaining copies.`);
+  } else if (baselineFile.action === "reject")
+    failures.push(
+      `${shown} is not in its written form (paths sorted by code unit); rewrite it with \`node scripts/verify/architecture-guards.mjs --shrink-baselines\`.`,
+    );
+}
+if (baselinesShrunk) console.log("Lowered counted baselines.");
 
 if (failures.length > 0) {
   console.error(`Architecture guards failed:\n\n${failures.join("\n\n")}\n`);
