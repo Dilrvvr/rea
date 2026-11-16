@@ -1,4 +1,4 @@
-import { z } from "incur";
+import { z } from "zod";
 import type { ContractCommandContext } from "./contractCommand.js";
 import type { AnalysisViewRequest } from "../domain/analysisView/analysisViewRequest.js";
 import { publishCliAnalysisEvidence } from "./analysisEvidenceDelivery.js";
@@ -116,8 +116,11 @@ export const runCliJavaScriptApplicationAnalysis = async (
   },
   host: CliJavaScriptAnalysisHost = processJavaScriptAnalysis,
 ): Promise<JsonValue> => {
-  const { analyzeJavaScriptApplication } =
-    await import("../application/javascript/JavaScriptApplicationService.js");
+  const [{ analyzeJavaScriptApplication }, { javascriptSourceAnalysis }] =
+    await Promise.all([
+      import("../application/javascript/JavaScriptApplicationService.js"),
+      import("../composition/javascriptSourceAnalysis.js"),
+    ]);
   const progress = createProgressReporter(
     async (update) => {
       writeCliProgressLine(update);
@@ -126,6 +129,7 @@ export const runCliJavaScriptApplicationAnalysis = async (
   );
   const resources = host.scope();
   const result = await analyzeJavaScriptApplication(input, resources, {
+    sourceAnalysis: javascriptSourceAnalysis,
     environment,
     progress,
     ...(signal === undefined ? {} : { signal }),

@@ -1,4 +1,4 @@
-import { z } from "incur";
+import { z } from "zod";
 import { localPathStringSchema } from "../domain/localPath.js";
 import type { Logger } from "pino";
 import { OBJDUMP_PROVIDER_IDENTITY } from "../objdump/ObjdumpProviderIdentity.js";
@@ -10,16 +10,18 @@ import {
   AnalysisInputError,
   AnalysisOutputError,
 } from "../domain/analysisErrorCore.js";
-import { evidenceSchema, type Evidence } from "../domain/evidence.js";
+import type { Evidence } from "../domain/evidence.js";
+import { recognizeEvidence } from "../domain/evidenceValidation.js";
 import type { JsonValue } from "../domain/jsonValue.js";
 import type { Result } from "../domain/result.js";
 import { ok } from "../domain/result.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import { OBJDUMP_ARTIFACT_OPERATIONS } from "../domain/reverseEngineering.js";
 import { logCliCommand } from "../cliLogging.js";
+import { registerCliCommand } from "./commandRegistry.js";
 import type { CliInstance } from "./types.js";
 import { withCommandCancellation } from "./commandCancellation.js";
-import { CLI_COMMANDS } from "../cliCommandNames.js";
+import { CLI_COMMANDS } from "../contracts/cliCommandNames.js";
 import { REVERSE_ENGINEERING_TOOL_CONTRACTS } from "../contracts/reverseEngineeringToolContracts.js";
 import { contractNamed } from "./contractCliDescription.js";
 import {
@@ -46,6 +48,8 @@ import {
 } from "./analysisEvidenceDelivery.js";
 import { finishAnalysisCommand } from "./finishAnalysisCommand.js";
 import { projectCliAnalysisResult } from "./projectCliAnalysisResult.js";
+import { errorMessage } from "../kernel/errorMessage.js";
+import { isRecord } from "../kernel/isRecord.js";
 
 const executeWithCleanup = async (
   service: ReverseEngineeringService,
@@ -74,14 +78,12 @@ const cleanupOnlyCompleteEvidence = (
     error.partialObservation === undefined
   )
     return undefined;
-  const parsed = evidenceSchema.safeParse(error.partialObservation);
-  if (!parsed.success) return undefined;
-  const normalized = parsed.data.normalized_result;
-  return typeof normalized === "object" &&
-    normalized !== null &&
-    !Array.isArray(normalized) &&
-    normalized.completion_status !== "unknown"
-    ? parsed.data
+  // Only authenticated Evidence is recovered; otherwise the error stands.
+  const parsed = recognizeEvidence(error.partialObservation);
+  if (!parsed.ok || parsed.value === undefined) return undefined;
+  const normalized = parsed.value.normalized_result;
+  return isRecord(normalized) && normalized.completion_status !== "unknown"
+    ? parsed.value
     : undefined;
 };
 
@@ -117,13 +119,9 @@ const closeDebuggerCommandSession = async (
         reason:
           cause instanceof AggregateError
             ? cause.errors
-                .map((error: unknown) =>
-                  error instanceof Error ? error.message : String(error),
-                )
+                .map((error: unknown) => errorMessage(error))
                 .join("; ")
-            : cause instanceof Error
-              ? cause.message
-              : String(cause),
+            : errorMessage(cause),
         ...retainedDebuggerDiagnostics(cause),
       },
       {
@@ -235,7 +233,7 @@ export const registerReverseEngineeringCommands = (
         ),
       ),
   );
-  cli.command(CLI_COMMANDS.debugWithGdb, {
+  registerCliCommand(cli, CLI_COMMANDS.debugWithGdb, {
     description:
       "Run one unrestricted GDB console command in an ephemeral MI session; provide an inferior TTY so a live target can be safely detached",
     args: z.object({
@@ -311,7 +309,7 @@ export const registerReverseEngineeringCommands = (
         }),
       ),
   });
-  cli.command(CLI_COMMANDS.debugWithRizin, {
+  registerCliCommand(cli, CLI_COMMANDS.debugWithRizin, {
     description:
       "Run one unrestricted Rizin debugger command in an ephemeral session",
     args: z.object({

@@ -1,4 +1,5 @@
-import { Cli, z } from "incur";
+import { Cli } from "incur";
+import { z } from "zod";
 
 import {
   captureProcessScenarioFile,
@@ -13,10 +14,11 @@ import { SESSION_TOOL_CONTRACTS } from "../contracts/sessionToolContracts.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import { contractNamed } from "./contractCliDescription.js";
 import { registerContractCommand } from "./contractCommand.js";
+import { registerCliCommand } from "./commandRegistry.js";
 import type { CliInstance } from "./types.js";
 import { logCliCommand } from "../cliLogging.js";
 import type { Logger } from "pino";
-import { CLI_COMMANDS } from "../cliCommandNames.js";
+import { CLI_COMMANDS } from "../contracts/cliCommandNames.js";
 import { localPathStringSchema } from "../domain/localPath.js";
 import { withCommandCancellation } from "./commandCancellation.js";
 
@@ -26,7 +28,7 @@ export const registerProcessCommands = (
   logger: Logger,
   environment: Readonly<Record<string, string | undefined>>,
 ): void => {
-  cli.command(CLI_COMMANDS.captureProcess, {
+  registerCliCommand(cli, CLI_COMMANDS.captureProcess, {
     description: "Capture one caller-selected process scenario",
     args: z.object({
       scenario: localPathStringSchema.describe("Scenario JSON path"),
