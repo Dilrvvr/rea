@@ -188,10 +188,11 @@ export type ImageSection = {
     }
 );
 
-/** Declared PT_DYNAMIC file extent, before consumer-specific admission. */
+/** Declared PT_DYNAMIC location, before consumer-specific admission. */
 export interface ElfDynamicSegment {
   readonly offset: bigint;
   readonly size: bigint;
+  readonly virtual_address: bigint;
 }
 
 /** Native container facts, without language metadata search policy. */
@@ -619,7 +620,7 @@ export const createFileMappingIndex = (
     if (typeof translations[index] === "bigint") next = index;
     nextMapped[index] = next;
   }
-  const offset = (address: bigint, size: number): number => {
+  const tryOffset = (address: bigint, size: number): number | undefined => {
     if (!Number.isSafeInteger(size) || size <= 0)
       return mappedFileOffset(mappings, address, size, zeroFills);
     const end = address + BigInt(size);
@@ -641,10 +642,7 @@ export const createFileMappingIndex = (
       );
     const translation = translations[interval];
     if (typeof translation !== "bigint" || (runEnd[interval] as bigint) < end)
-      throw new BinaryMappingFailure(
-        "unmapped",
-        "Virtual address or string range is not file mapped",
-      );
+      return undefined;
     const zeroFill = lastAtOrBelow(zeroFilled.starts, end - 1n);
     if (zeroFill >= 0 && (zeroFilled.reach[zeroFill] as bigint) > address)
       throw new BinaryMappingFailure(
@@ -652,6 +650,15 @@ export const createFileMappingIndex = (
         "Virtual address has ambiguous file and zero-fill mappings",
       );
     return Number(address + translation);
+  };
+  const offset = (address: bigint, size: number): number => {
+    const resolved = tryOffset(address, size);
+    if (resolved === undefined)
+      throw new BinaryMappingFailure(
+        "unmapped",
+        "Virtual address or string range is not file mapped",
+      );
+    return resolved;
   };
   const prefix = (
     address: bigint,
@@ -692,6 +699,7 @@ export const createFileMappingIndex = (
   };
   return {
     offset,
+    tryOffset,
     prefix,
     readCString: (bytes, address, maximumBytes) =>
       readMappedString(bytes, access, address, maximumBytes),
@@ -701,6 +709,8 @@ export const createFileMappingIndex = (
 /** One immutable image's indexed mappings and bounded string access. */
 export interface FileMappingIndex {
   readonly offset: (address: bigint, size: number) => number;
+  /** Like `offset`, returning `undefined` on unmapped spans while still throwing on ambiguity. */
+  readonly tryOffset: (address: bigint, size: number) => number | undefined;
   /** Longest file-backed prefix up to the requested length with one translation. */
   readonly prefix: (
     address: bigint,
