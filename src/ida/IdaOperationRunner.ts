@@ -12,6 +12,7 @@ import {
   analysisSearchQuerySchema,
   type AnalysisSearchQuery,
 } from "../domain/analysisSearch.js";
+import { extractRequiredRegexLiteral } from "../domain/regexLiteralCandidate.js";
 import {
   matchRegexValues,
   launchRegexMatchingLimitation,
@@ -230,18 +231,25 @@ export class IdaOperationRunner {
       throw new AnalysisProtocolError(
         `IDA function lookup failed for ${query}: ${outcome.missing}`,
       );
+    const message = `IDA could not resolve procedure ${JSON.stringify(query)}: ${outcome.missing}.`;
     throw new AnalysisInputError(
       requestedBy,
       {
         cause: new AnalysisProtocolError(
           `IDA function lookup failed for ${query}: ${outcome.missing}`,
         ),
+        userMessage: message,
+        conformsToInputContract: true,
+        related: { operations: ["list_procedures", "search_procedures"] },
+        remediationAction:
+          "Choose an observed name or address from the current IDA inventory. CLI: rea search <path> . --kind procedures --mode regex --provider ida. MCP: use search_procedures or list_procedures. An inventory miss leaves the function's presence in the artifact unknown.",
       },
       [
         {
-          path: [],
+          path: ["procedure"],
           reason: "invalid_value",
-          message: `IDA could not resolve procedure ${JSON.stringify(query)}: ${outcome.missing}.`,
+          message,
+          observed: { procedure: query },
         },
       ],
     );
@@ -589,10 +597,16 @@ export class IdaOperationRunner {
         query === undefined && parameters.address !== undefined
           ? idaAddressSchema.parse(parameters.address)
           : undefined;
+      const candidateLiteral =
+        query === undefined
+          ? undefined
+          : query.mode === "literal"
+            ? query.pattern
+            : extractRequiredRegexLiteral(query.pattern, query.case_sensitive);
       const candidatePattern =
-        query?.mode === "literal"
-          ? idaLiteralSearchPattern(query.pattern, query.case_sensitive)
-          : undefined;
+        candidateLiteral === undefined || query === undefined
+          ? undefined
+          : idaLiteralSearchPattern(candidateLiteral, query.case_sensitive);
       const items = await this.strings(candidatePattern);
       return query !== undefined
         ? this.searchItems(operation, items, query)
