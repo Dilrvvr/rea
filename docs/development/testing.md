@@ -680,6 +680,30 @@ Report unexecuted recovery steps explicitly.
 Real-provider scripts that start compilers, linkers, readers, or the REA CLI
 follow [Verifier scripts](#verifier-scripts).
 
+### Public-corpus checks
+
+Synthetic fixtures prove the cases you thought of. Published files from
+well-known projects find the ones you didn't: unusual but valid headers,
+large real images and formats REA doesn't recognise yet. Use them for routing,
+parser-robustness and output-size checks, and download them during the check.
+Never commit them. Never execute downloaded files.
+
+| Corpus                                            | Exercises                                                      |
+| ------------------------------------------------- | -------------------------------------------------------------- |
+| corkami/pocs `PE/bin`                             | PE parser strictness across documented header quirks           |
+| WerWolv/ImHex-Patterns `tests/patterns/test_data` | First-contact acceptance and refusal across many formats       |
+| bkaradzic/bgfx `examples/runtime/shaders`         | Embedded DXBC, DXIL and SPIR-V at a fixed offset               |
+| Godot editor release (win64)                      | Static PE readers on an image over 100 MB                      |
+| x64dbg snapshot with its symbols archive          | 32- and 64-bit PEs with matching PDBs                          |
+| Orama-Interactive/Pixelorama releases             | Godot 3 and 4 `.pck`, embedded packs, a known two-version diff |
+
+For each file record the REA revision, the asset (repository, release tag,
+name, SHA-256), the command, whether it was accepted or refused, the
+suggested next probes, and the output size. Compare facts with an independent
+parser or the format specification where one exists. A count of accepted files
+says nothing about correctness. A refusal is a finding only when REA has a
+reader for that format or the refusal hides facts it already parsed.
+
 ### Checking installers and publisher downloads
 
 When changing setup or investigating an install failure, check the stages affected
@@ -1375,9 +1399,10 @@ rebuilds misses. A restore prefix with the same platform and toolchain permits
 partial task reuse when one generator's inputs change; Turbo still invalidates
 that generator's entry. Native outputs are not stored in this cache.
 
-POSIX native package jobs, documentation checks, Go binary verification, and the
-Apple artifact lane reuse the same workflow's portable Turbo cache
-(`rea-build-cache`) for compiled JavaScript, skills, and catalogs. Windows jobs
+The build job stages and uploads `rea-build-cache` when a selected POSIX native
+package, Apple artifact, or reusable provider job consumes it. Portable test
+shards download `rea-test-runtime`. Documentation checks restore the
+cross-run Turbo cache. Windows jobs
 (`windows-curated` and Windows `package-e2e`) compile with `typescript` rather
 than Linux's accelerated `tsrs` checker, so they restore and publish a separate
 Windows `.turbo/cache/` family (`rea-windows-build-v1-Windows-X64-*`, pruned to
