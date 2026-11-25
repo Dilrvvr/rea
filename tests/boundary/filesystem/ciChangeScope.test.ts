@@ -27,6 +27,7 @@ import {
 import {
   executeWorkflowFixture as execFileAsync,
   workflowGit as git,
+  workflowFixtureEnvironment,
 } from "../../support/workflowGit.js";
 
 async function commit(directory: string) {
@@ -117,7 +118,7 @@ async function runPlanScript(
     {
       cwd: directory,
       env: {
-        ...process.env,
+        ...workflowFixtureEnvironment(),
         BASE_SHA: base,
         HEAD_SHA: head,
         GITHUB_SHA: head,
@@ -946,7 +947,7 @@ it("selects a completed CI ancestor rather than a foreign or non-terminal run", 
     {
       cwd: directory,
       env: {
-        ...process.env,
+        ...workflowFixtureEnvironment(),
         PATH: `${bin}:${process.env.PATH}`,
         GH_FIXTURE_RESPONSE: response,
         CI_REPOSITORY: "owner/repo",
@@ -979,7 +980,7 @@ it("returns an empty baseline when GitHub lookup fails", async ({ skip }) => {
     {
       cwd: directory,
       env: {
-        ...process.env,
+        ...workflowFixtureEnvironment(),
         PATH: `${bin}:${process.env.PATH}`,
         CI_REPOSITORY: "owner/repo",
         CI_DEFAULT_BRANCH: "main",
@@ -1140,7 +1141,7 @@ it.each([
   ["scripts/lib/release-proposal.mjs", { code: true, package: true }],
   ["scripts/lib/release-proposal.d.mts", { code: true, package: true }],
   ["scripts/lib/release-pull-request.mjs", { code: true, package: true }],
-  ["patches/release-please+17.3.0.patch", { code: true, package: true }],
+  ["patches/release-please+17.11.2.patch", { code: true, package: true }],
   [
     "tests/boundary/filesystem/releaseProposal.test.ts",
     { code: true, package: true },
@@ -1879,7 +1880,7 @@ it.each(["evm", "browser"])(
     const run = (result: string) =>
       execFileAsync(process.execPath, [command], {
         env: {
-          ...process.env,
+          ...workflowFixtureEnvironment(),
           CI_JOBS: JSON.stringify({ ...jobs, [scope]: { result } }),
         },
       });
@@ -2448,21 +2449,52 @@ it.each([
   },
 );
 
-it("reads a Git blob whose path contains a line break alongside an ordinary blob", async ({
+it("reads blobs at the requested revision with tabs and newlines in their paths", async ({
   skip,
 }) => {
   skip(
     process.platform === "win32",
-    "Windows paths cannot contain line breaks",
+    "Windows paths cannot contain tabs or line breaks",
   );
   const { directory } = await fixture();
-  const path = "src/two\nlines.test.ts";
+  const path = "src/tab\ttwo\nlines.test.ts";
   const head = await change(directory, [path], "multiline path\n");
-  expect(gitRepository(directory).readFiles(head, [path, "README.md"])).toEqual(
+  await change(directory, [path], "later revision\n");
+  const repository = gitRepository(directory);
+  expect(repository.readFiles(head, [path, "README.md"])).toEqual(
     new Map([
       [path, "multiline path\n"],
       ["README.md", "Initial fixture content\n"],
     ]),
+  );
+  for (const missing of ["src", "missing.ts"])
+    expect(() => repository.readFiles(head, [path, missing])).toThrow(
+      `Git could not read ${head}:${missing}`,
+    );
+});
+
+it("keeps a non-UTF-8 Git name distinct from a literal replacement character", async () => {
+  const { directory, base } = await fixture();
+  const blob = await git(directory, ["rev-parse", `${base}:README.md`]);
+  // Write the raw tree object so this also runs on UTF-8-only filesystems.
+  await writeFile(
+    join(directory, "raw-tree"),
+    Buffer.concat([
+      Buffer.from("100644 "),
+      Buffer.from([0xff]),
+      Buffer.from(".ts\0"),
+      Buffer.from(blob, "hex"),
+    ]),
+  );
+  const tree = await git(directory, [
+    "hash-object",
+    "-w",
+    "-t",
+    "tree",
+    "raw-tree",
+  ]);
+  expect(() => gitRepository(directory).readFiles(tree, ["\uFFFD.ts"])).toThrow(
+    `Git could not read ${tree}:\uFFFD.ts`,
   );
 });
 
